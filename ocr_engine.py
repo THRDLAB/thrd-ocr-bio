@@ -45,43 +45,29 @@ def _run_tesseract_data(img: Image.Image, psm: int = 6):
 
 
 def premium_extract_text(path: str) -> Optional[OCRResult]:
+    """
+    Version light :
+    - resize max 1400px
+    - grayscale + autocontrast + sharpen
+    - 1 seul image_to_string
+    - 1 seul image_to_data
+    """
     try:
-        base = _load_image(path)
+        img = _load_image(path)
     except Exception:
         return None
 
-    base = _resize_if_needed(base)
+    # Prétraitement simple
+    img = _resize_if_needed(img, max_side=1400)
+    img = ImageOps.autocontrast(ImageOps.grayscale(img)).convert("RGB")
+    img = _sharpen(img)
 
-    variants = [
-        ImageOps.autocontrast(ImageOps.grayscale(base)).convert("RGB"),
-        _upscale(base),
-        _sharpen(base),
-    ]
+    # OCR texte
+    text = pytesseract.image_to_string(img, lang="fra+eng", config="--psm 6")
 
-    all_text = []
-    best_variant = None
-    best_length = 0
-
-    for img in variants:
-        try:
-            txt = _run_tesseract_string(img)
-            if txt and len(txt) > best_length:
-                best_length = len(txt)
-                best_variant = img
-            all_text.append(txt)
-        except:
-            continue
-
-    if not all_text:
-        return OCRResult(raw_text="", boxes=[])
-
-    merged = "\n".join(all_text)
-
-    if best_variant is None:
-        return OCRResult(raw_text=merged, boxes=[])
-
+    # OCR boxes
     try:
-        data = _run_tesseract_data(best_variant)
+        data = pytesseract.image_to_data(img, lang="fra+eng", config="--psm 6", output_type=Output.DICT)
         boxes = []
         for i in range(len(data["text"])):
             t = data["text"][i]
@@ -94,7 +80,7 @@ def premium_extract_text(path: str) -> Optional[OCRResult]:
                 "width": data["width"][i],
                 "height": data["height"][i],
             })
-    except:
+    except Exception:
         boxes = []
 
-    return OCRResult(raw_text=merged, boxes=boxes)
+    return OCRResult(raw_text=text, boxes=boxes)
