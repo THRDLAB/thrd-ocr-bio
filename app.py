@@ -40,18 +40,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------
 
 
-def parse_tsh(text: str) -> Optional[TSHParseResult]:
-    """
-    TODO: implémenter le parsing réel de la TSH dans le texte.
-    Pour l’instant, renvoie None pour simuler un 'TSH_NOT_FOUND'.
-    """
-    logger.info("[parse_tsh] Called (stub), length of text=%d", len(text or ""))
-    # Ici tu implémenteras plus tard la logique de:
-    # - recherche de lignes contenant 'tsh', 'tshus', etc.
-    # - extraction de la valeur, unité, plage de référence, etc.
-    return None
-
-
 def _save_upload_to_temp(upload_file: UploadFile) -> str:
     """
     Sauvegarde le fichier uploadé dans un fichier temporaire
