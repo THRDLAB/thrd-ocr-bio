@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-# --- Install system dependencies for OpenCV + Tesseract ---
+# ===== Install system dependencies =====
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
     tesseract-ocr-fra \
@@ -11,21 +11,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrender1 \
     && rm -rf /var/lib/apt/lists/*
 
-# --- Set working directory ---
 WORKDIR /app
 
-# --- Copy requirements ---
+# ===== Requirements =====
 COPY requirements.txt .
 
-# --- Install Python packages in correct order ---
+# numpy must be installed BEFORE opencv
 RUN pip install --no-cache-dir numpy==1.26.4
 RUN pip install --no-cache-dir -r requirements.txt
 
-# --- Copy app ---
+# ===== App files =====
 COPY . .
 
-# --- Expose port ---
 EXPOSE 8000
 
-# --- Start server ---
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
