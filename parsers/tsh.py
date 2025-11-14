@@ -199,6 +199,7 @@ def _find_unit_near_value(
     """
     Cherche une unité dans la zone située après la valeur, mais avant le prochain nombre,
     avec une limite de longueur pour éviter de partir trop loin dans la ligne.
+    Gère aussi les OCR foireux du type muI/I, mul/1, etc.
     """
 
     # Zone de recherche : entre la fin de la valeur et le prochain nombre
@@ -207,7 +208,7 @@ def _find_unit_near_value(
     search_zone = block[end_idx:stop]
     search_zone_lower = search_zone.lower()
 
-    # 1. Unités connues (mui/l, µui/ml, etc.)
+    # 1. Unités écrites "proprement"
     for known in KNOWN_UNITS:
         if known in search_zone_lower:
             pattern = re.escape(known)
@@ -216,9 +217,10 @@ def _find_unit_near_value(
                 return m.group(0).strip()
             return known
 
-    # 2. Regex plus permissive : [m/µ/u] + (u/i) + "/" + "l" ou "ml"
+    # 2. Regex permissive : accepte les erreurs OCR sur la dernière lettre (l <-> 1 <-> i)
+    # ex : "mui/l", "mui/1", "mui/i", "mUl/l", etc.
     generic_unit_re = re.compile(
-        r"[mµu]\s*u?i?\s*/\s*m?l",
+        r"[mµu]\s*u?\s*i?\s*/\s*[ml1i]",
         flags=re.IGNORECASE,
     )
     m2 = generic_unit_re.search(search_zone)
