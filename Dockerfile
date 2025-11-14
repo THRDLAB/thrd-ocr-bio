@@ -1,38 +1,31 @@
-# Dockerfile
-
 FROM python:3.11-slim
 
-# Empêche Python de bufferiser la sortie (logs en direct)
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
-
-# Mise à jour + dépendances système minimales + tesseract
-RUN apt-get update && apt-get install -y \
+# --- Install system dependencies for OpenCV + Tesseract ---
+RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
     tesseract-ocr-fra \
-    tesseract-ocr-eng \
-    libtesseract-dev \
-    build-essential \
-    poppler-utils \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Création dossier app
+# --- Set working directory ---
 WORKDIR /app
 
-# Copie des fichiers de dépendances
-COPY requirements.txt /app/requirements.txt
+# --- Copy requirements ---
+COPY requirements.txt .
 
-# Installation des dépendances Python
-RUN pip install --no-cache-dir -r /app/requirements.txt
+# --- Install Python packages in correct order ---
+RUN pip install --no-cache-dir numpy==1.26.4
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copie du reste du code
-COPY . /app
+# --- Copy app ---
+COPY . .
 
-# Variable d'env pour la langue OCR (fra+eng => TSH et contextes en français/anglais)
-ENV OCR_LANG=fra+eng
-
-# Exposition du port (optionnel mais pratique)
+# --- Expose port ---
 EXPOSE 8000
 
-# Commande de lancement (FastAPI / Uvicorn)
+# --- Start server ---
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
