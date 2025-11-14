@@ -8,6 +8,7 @@ import os
 import logging
 
 # Import du vrai OCR
+from models import HealthResponse, TSHResponse
 from ocr_engine import extract_text_from_file
 from parsers.tsh import parse_tsh, TSHParseResult
 
@@ -32,29 +33,6 @@ app.add_middleware(
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------
-# Modèles Pydantic
-# ---------------------------------------------------------------------
-
-
-class TSHResponse(BaseModel):
-    ok: bool
-    marker: str = "TSH"
-    tsh_value: Optional[float] = None
-    tsh_unit: Optional[str] = None
-    ref_min: Optional[float] = None
-    ref_max: Optional[float] = None
-    confidence: Optional[Literal["low", "medium", "high"]] = None
-    raw_text: Optional[str] = None
-    error: Optional[str] = None
-    debug: Optional[dict] = None
-
-
-class HealthResponse(BaseModel):
-    ok: bool
-    service: str
-    version: str
 
 
 # ---------------------------------------------------------------------
