@@ -124,10 +124,10 @@ def _extract_tsh_from_block(block: str) -> Optional[TSHParseResult]:
 
     Stratégie :
     - on parcourt tous les nombres de la ligne ;
-    - pour chaque nombre on regarde s'il y a une unité de TSH dans la zone qui suit,
-      AVANT le prochain nombre ;
-    - on choisit le premier nombre avec une unité valide ;
-    - à défaut, on retombe sur le premier nombre plausible.
+    - pour chaque nombre on regarde s'il y a une unité de TSH juste après (avant le prochain nombre) ;
+    - si unité trouvée → on retourne directement cette valeur ;
+    - sinon on garde en préférence la première valeur décimale (avec virgule/point) plausible ;
+    - à défaut, on retombe sur la première valeur plausible.
     """
 
     logger.debug("[TSH] Extracting from block: %s", block)
@@ -138,6 +138,7 @@ def _extract_tsh_from_block(block: str) -> Optional[TSHParseResult]:
         return None
 
     candidate_result: Optional[TSHParseResult] = None
+    candidate_decimal_result: Optional[TSHParseResult] = None
 
     for i, m in enumerate(matches):
         value_str = m.group(1).replace(",", ".")
@@ -150,6 +151,9 @@ def _extract_tsh_from_block(block: str) -> Optional[TSHParseResult]:
         if value < 0 or value > 1000:
             continue
 
+        # Est-ce un nombre décimal ?
+        is_decimal = (',' in m.group(1)) or ('.' in m.group(1))
+
         # Position du prochain nombre (pour limiter la zone de recherche de l'unité)
         if i + 1 < len(matches):
             next_start = matches[i + 1].start()
@@ -160,7 +164,7 @@ def _extract_tsh_from_block(block: str) -> Optional[TSHParseResult]:
         ref_min, ref_max = _find_reference_range(block)
         confidence = _compute_confidence(value, unit, ref_min, ref_max)
 
-        # Si on trouve une unité, on considère que c’est la vraie TSH
+        # 1) Si on a une unité, c’est notre meilleur candidat → on renvoie direct
         if unit is not None:
             result = TSHParseResult(
                 tsh_value=value,
@@ -172,7 +176,17 @@ def _extract_tsh_from_block(block: str) -> Optional[TSHParseResult]:
             logger.debug("[TSH] Parsed result with unit: %s", result)
             return result
 
-        # Sinon on garde éventuellement comme candidat "au cas où"
+        # 2) Sinon, on garde EN PRIORITÉ la première valeur décimale plausible
+        if is_decimal and candidate_decimal_result is None:
+            candidate_decimal_result = TSHParseResult(
+                tsh_value=value,
+                tsh_unit=None,
+                ref_min=ref_min,
+                ref_max=ref_max,
+                confidence=confidence,
+            )
+
+        # 3) Et, en backup, la première valeur plausible tout court
         if candidate_result is None:
             candidate_result = TSHParseResult(
                 tsh_value=value,
@@ -181,6 +195,11 @@ def _extract_tsh_from_block(block: str) -> Optional[TSHParseResult]:
                 ref_max=ref_max,
                 confidence=confidence,
             )
+
+    # Si aucune unité n’a été trouvée, on retourne d’abord une décimale si on en a une
+    if candidate_decimal_result is not None:
+        logger.debug("[TSH] Parsed decimal result without explicit unit: %s", candidate_decimal_result)
+        return candidate_decimal_result
 
     if candidate_result is not None:
         logger.debug("[TSH] Parsed result without explicit unit: %s", candidate_result)
