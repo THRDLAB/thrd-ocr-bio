@@ -65,13 +65,8 @@ class HealthResponse(BaseModel):
 # ---------------------------------------------------------------------
 
 def extract_text_from_file(path: str) -> str:
-    """
-    TODO: implémenter l’OCR réel.
-    - Si PDF texte : extraire via pypdf/pdfplumber
-    - Si PDF scanné / image : passer par Tesseract
-    Pour l’instant, renvoie juste une chaîne vide pour poser la structure.
-    """
-    # Placeholder temporaire — à remplacer par la vraie logique OCR
+    
+    from ocr_engine import extract_text_from_file
     logger.info(f"[extract_text_from_file] Called with path={path}")
     return ""
 
