@@ -124,7 +124,8 @@ def _extract_tsh_from_block(block: str) -> Optional[TSHParseResult]:
 
     Stratégie :
     - on parcourt tous les nombres de la ligne ;
-    - pour chaque nombre on regarde s'il y a une unité de TSH dans les caractères qui suivent ;
+    - pour chaque nombre on regarde s'il y a une unité de TSH dans la zone qui suit,
+      AVANT le prochain nombre ;
     - on choisit le premier nombre avec une unité valide ;
     - à défaut, on retombe sur le premier nombre plausible.
     """
@@ -138,22 +139,28 @@ def _extract_tsh_from_block(block: str) -> Optional[TSHParseResult]:
 
     candidate_result: Optional[TSHParseResult] = None
 
-    # 1. On cherche d'abord un nombre qui a une unité de TSH à proximité
-    for m in matches:
+    for i, m in enumerate(matches):
         value_str = m.group(1).replace(",", ".")
         try:
             value = float(value_str)
         except ValueError:
             continue
 
+        # Filtre grossier d’absurdités
         if value < 0 or value > 1000:
             continue
 
-        unit = _find_unit_near_value(block, m.start(), m.end())
+        # Position du prochain nombre (pour limiter la zone de recherche de l'unité)
+        if i + 1 < len(matches):
+            next_start = matches[i + 1].start()
+        else:
+            next_start = len(block)
+
+        unit = _find_unit_near_value(block, m.start(), m.end(), next_start)
         ref_min, ref_max = _find_reference_range(block)
         confidence = _compute_confidence(value, unit, ref_min, ref_max)
 
-        # Si on trouve une unité, c'est notre meilleur candidat
+        # Si on trouve une unité, on considère que c’est la vraie TSH
         if unit is not None:
             result = TSHParseResult(
                 tsh_value=value,
@@ -165,7 +172,7 @@ def _extract_tsh_from_block(block: str) -> Optional[TSHParseResult]:
             logger.debug("[TSH] Parsed result with unit: %s", result)
             return result
 
-        # On garde quand même un candidat sans unité au cas où
+        # Sinon on garde éventuellement comme candidat "au cas où"
         if candidate_result is None:
             candidate_result = TSHParseResult(
                 tsh_value=value,
@@ -175,7 +182,6 @@ def _extract_tsh_from_block(block: str) -> Optional[TSHParseResult]:
                 confidence=confidence,
             )
 
-    # 2. Si aucun nombre n’a d’unité claire, on renvoie le premier candidat plausible
     if candidate_result is not None:
         logger.debug("[TSH] Parsed result without explicit unit: %s", candidate_result)
         return candidate_result
@@ -183,30 +189,44 @@ def _extract_tsh_from_block(block: str) -> Optional[TSHParseResult]:
     logger.debug("[TSH] No plausible TSH value in block.")
     return None
 
-def _find_unit_near_value(block: str, start_idx: int, end_idx: int) -> Optional[str]:
-    """
-    Cherche une unité dans un voisinage autour de la valeur.
-    On regarde environ 20–30 caractères après la valeur.
-    """
-    window = block[end_idx : end_idx + 30].lower()
 
+def _find_unit_near_value(
+    block: str,
+    start_idx: int,
+    end_idx: int,
+    next_number_start: int,
+) -> Optional[str]:
+    """
+    Cherche une unité dans la zone située après la valeur, mais avant le prochain nombre,
+    avec une limite de longueur pour éviter de partir trop loin dans la ligne.
+    """
+
+    # Zone de recherche : entre la fin de la valeur et le prochain nombre
+    max_span = end_idx + 25  # on ne va pas chercher à 3 km
+    stop = min(next_number_start, len(block), max_span)
+    search_zone = block[end_idx:stop]
+    search_zone_lower = search_zone.lower()
+
+    # 1. Unités connues (mui/l, µui/ml, etc.)
     for known in KNOWN_UNITS:
-        if known in window:
-            # On renvoie la forme telle qu'apparaît dans le texte original si possible
-            # (sinon on renvoie la forme connue)
+        if known in search_zone_lower:
             pattern = re.escape(known)
-            m = re.search(pattern, block[end_idx : end_idx + 30], flags=re.IGNORECASE)
+            m = re.search(pattern, search_zone, flags=re.IGNORECASE)
             if m:
                 return m.group(0).strip()
             return known
 
-    # Parfois les labos écrivent juste "mUI/L" ou "µUI/mL" sans espaces => on capture un pattern plus large :
-    generic_unit_re = re.compile(r"[µmu]?ui\s*/\s*[ml]", flags=re.IGNORECASE)
-    m2 = generic_unit_re.search(block[end_idx : end_idx + 30])
+    # 2. Regex plus permissive : [m/µ/u] + (u/i) + "/" + "l" ou "ml"
+    generic_unit_re = re.compile(
+        r"[mµu]\s*u?i?\s*/\s*m?l",
+        flags=re.IGNORECASE,
+    )
+    m2 = generic_unit_re.search(search_zone)
     if m2:
         return m2.group(0).strip()
 
     return None
+
 
 
 def _find_reference_range(block: str) -> tuple[Optional[float], Optional[float]]:
