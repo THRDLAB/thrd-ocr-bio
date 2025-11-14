@@ -1,156 +1,114 @@
+import os
+import shutil
+import uuid
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional
-import tempfile
-import shutil
-import os
-import logging
+from pydantic import BaseModel
 
-# --- Premium OCR & Parsing ---
-from models import HealthResponse, TSHResponse
-from ocr_engine import premium_extract_text  # ⬅️ nouveau
-from parsers.tsh import premium_parse_tsh    # ⬅️ nouveau
+from ocr_engine import premium_extract_text
+from parsers.tsh import premium_parse_tsh
 
-# ---------------------------------------------------------------------
-# Config & init
-# ---------------------------------------------------------------------
 
-app = FastAPI(
-    title="THRD OCR Bio",
-    description="Service OCR intelligent pour extraire la TSH depuis des bilans sanguins (PDF / images).",
-    version="0.2.0-premium",
-)
+# =========================================================
+# MODELS
+# =========================================================
+
+class TSHResponse(BaseModel):
+    ok: bool
+    marker: str = "TSH"
+    tsh_value: float | None = None
+    tsh_unit: str | None = None
+    ref_min: float | None = None
+    ref_max: float | None = None
+    confidence: str | None = None
+    error: str | None = None
+    raw_text: str | None = None
+
+
+# =========================================================
+# FASTAPI INIT
+# =========================================================
+
+app = FastAPI(title="THRD OCR Bio", version="2.0 Premium")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],     # à restreindre en prod
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------
-# Utils internes
-# ---------------------------------------------------------------------
+# =========================================================
+# UTILS
+# =========================================================
 
-def _save_upload_to_temp(upload_file: UploadFile) -> str:
-    """Enregistre le fichier uploadé dans un tmp local"""
-    suffix = ""
-    if upload_file.filename:
-        _, ext = os.path.splitext(upload_file.filename)
-        suffix = ext
+def save_temp_file(upload: UploadFile) -> str:
+    """Save file to /tmp with a random name."""
+    ext = os.path.splitext(upload.filename)[1].lower()
+    fname = f"tmp_{uuid.uuid4().hex}{ext}"
+    path = os.path.join("/tmp", fname)
 
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-    try:
-        with tmp as f:
-            shutil.copyfileobj(upload_file.file, f)
-    finally:
-        upload_file.file.close()
+    with open(path, "wb") as f:
+        shutil.copyfileobj(upload.file, f)
 
-    logger.info(f"[temp] saved upload to {tmp.name}")
-    return tmp.name
+    return path
 
 
-def _is_supported_content_type(content_type: Optional[str]) -> bool:
-    if not content_type:
-        return False
-    return content_type in {
-        "image/jpeg",
-        "image/png",
-        "image/webp",
-        "application/pdf",
-    }
+# =========================================================
+# HEALTHCHECK
+# =========================================================
 
-# ---------------------------------------------------------------------
-# Endpoints
-# ---------------------------------------------------------------------
+@app.get("/health")
+async def health():
+    return {"ok": True}
 
-@app.get("/health", response_model=HealthResponse)
-async def health() -> HealthResponse:
-    return HealthResponse(ok=True, service="thrd-ocr-bio", version="0.2.0-premium")
 
+# =========================================================
+# OCR TSH ENDPOINT (PREMIUM)
+# =========================================================
 
 @app.post("/ocr/tsh", response_model=TSHResponse)
-async def ocr_tsh(file: UploadFile = File(...)) -> TSHResponse:
+async def ocr_tsh(file: UploadFile = File(...)):
     """
-    Endpoint premium :
-    - OCR multi-pass
-    - Détection automatique de la ligne TSH
-    - Analyse par colonnes (valeur actuelle vs antériorités)
-    - Extraction robustes des unités & valeurs de référence
-    - Fail-safe intelligent (ne renvoie jamais une mauvaise TSH)
+    Full OCR pipeline:
+    1. Save file
+    2. Multi-variant OCR (premium)
+    3. Premium TSH parser
+    4. JSON response simplified for Bubble
     """
-    if not _is_supported_content_type(file.content_type):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Unsupported content type: {file.content_type}. "
-                f"Supported: image/jpeg, image/png, image/webp, application/pdf."
-            ),
-        )
+    if not file:
+        raise HTTPException(status_code=400, detail="Missing file")
 
-    temp_path = _save_upload_to_temp(file)
+    # 1. Save file
+    tmp_path = save_temp_file(file)
 
-    try:
-        # OCR premium multi-pass
-        ocr_result = premium_extract_text(temp_path)
-
-        if not ocr_result or not ocr_result.raw_text:
-            return TSHResponse(
-                ok=False,
-                error="OCR_EMPTY_TEXT",
-                raw_text=None,
-                debug={
-                    "engine": "tesseract-premium",
-                    "path": temp_path,
-                },
-            )
-
-        # Parsing premium de la TSH
-        parsed = premium_parse_tsh(
-            raw_text=ocr_result.raw_text,
-            ocr_boxes=ocr_result.boxes,  # ⬅️ positions ligne/colonnes
-        )
-
-        if parsed is None or not parsed.ok:
-            # Fail-safe = pas de TSH valide trouvée
-            return TSHResponse(
-                ok=False,
-                error=parsed.error if parsed else "TSH_NOT_FOUND",
-                raw_text=ocr_result.raw_text,
-                debug={
-                    "engine": "tesseract-premium",
-                    "path": temp_path,
-                },
-            )
-
-        # OK : on renvoie la détection complète et fiabilisée
+    # 2. Run OCR
+    ocr = premium_extract_text(tmp_path)
+    if not ocr:
         return TSHResponse(
-            ok=True,
-            marker="TSH",
-            tsh_value=parsed.value,
-            tsh_unit=parsed.unit,
-            ref_min=parsed.ref_min,
-            ref_max=parsed.ref_max,
-            confidence=parsed.confidence,
-            raw_text=ocr_result.raw_text,
-            debug={
-                "engine": "tesseract-premium",
-                "path": temp_path,
-            },
+            ok=False,
+            error="OCR_FAILED",
+            raw_text=None
         )
 
-    finally:
-        try:
-            os.remove(temp_path)
-        except Exception:
-            pass
+    # 3. Parse TSH
+    parsed = premium_parse_tsh(ocr.raw_text, ocr.boxes)
+    if not parsed.ok:
+        return TSHResponse(
+            ok=False,
+            error=parsed.error,
+            raw_text=ocr.raw_text
+        )
 
-
-# Dev local
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
+    # 4. Build response
+    return TSHResponse(
+        ok=True,
+        tsh_value=parsed.value,
+        tsh_unit=parsed.unit,
+        ref_min=parsed.ref_min,
+        ref_max=parsed.ref_max,
+        confidence=parsed.confidence,
+        raw_text=ocr.raw_text
+    )
