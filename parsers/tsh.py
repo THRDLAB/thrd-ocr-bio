@@ -93,11 +93,29 @@ def parse_tsh(text: str) -> Optional[TSHParseResult]:
     return None
 
 
+def _normalize_for_keyword(s: str) -> str:
+    """
+    Supprime tout ce qui n'est pas une lettre et met en minuscule.
+    Exemple :
+    - "T.S.H"        -> "tsh"
+    - "T S H"        -> "tsh"
+    - "TSH 3ème gen" -> "tshèmegen"
+    """
+    return re.sub(r"[^a-z]", "", s.lower())
+
+
 def _line_contains_tsh_keyword(line_lower: str) -> bool:
-    for kw in TSH_KEYWORDS:
-        if kw in line_lower:
-            return True
+    """
+    Détection robuste des mots-clés TSH en utilisant la version normalisée de la ligne.
+    """
+    norm_line = _normalize_for_keyword(line_lower)
+    # On considère pour l'instant surtout "tsh" et "tshus"
+    if "tshus" in norm_line:
+        return True
+    if "tsh" in norm_line:
+        return True
     return False
+
 
 
 def _extract_tsh_from_block(block: str) -> Optional[TSHParseResult]:
