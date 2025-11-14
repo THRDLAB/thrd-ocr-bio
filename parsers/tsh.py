@@ -14,10 +14,6 @@ class ParsedTSH:
     error: Optional[str]
 
 
-# -----------------------------------------------------------------------------
-# Helpers généraux
-# -----------------------------------------------------------------------------
-
 def _clean(s: str) -> str:
     return s.lower().replace(",", ".").strip()
 
@@ -33,12 +29,8 @@ def _extract_numbers(s: str) -> List[float]:
     return out
 
 
-# -----------------------------------------------------------------------------
-# Détection TSH (tolérante : TSH, T.S.H, T S H, thyreostimuline…)
-# -----------------------------------------------------------------------------
+# --- Détection TSH tolérante (TSH, T.S.H, T S H, thyreostimuline, etc.) ---
 
-# - t\s*\.?\s*s\s*\.?\s*h  => tsh / t.s.h / t s h
-# - thyreo?stimuline      => thyreostimuline / thyreostimuline
 TSH_REGEX = re.compile(r"(t\s*\.?\s*s\s*\.?\s*h)|thyreo?stimuline", re.IGNORECASE)
 
 
@@ -46,40 +38,7 @@ def _contains_tsh(text: str) -> bool:
     return bool(TSH_REGEX.search(text))
 
 
-# -----------------------------------------------------------------------------
-# Unités
-# -----------------------------------------------------------------------------
-
-UNIT_PATTERNS = [
-    r"µ?\s*u?i\s*/\s*l",
-    r"µ?\s*u?i\s*/\s*ml",
-    r"mui\s*/\s*l",
-    r"mui\s*/\s*ml",
-]
-
-UNIT_CLEAN = {
-    "mui/l": "mUI/L",
-    "mui/ml": "mUI/mL",
-    "ui/l": "UI/L",
-    "uui/l": "uUI/L",
-    "µui/l": "µUI/L",
-    "µui/ml": "µUI/mL",
-}
-
-
-def _find_unit(line: str) -> Optional[str]:
-    line = _clean(line)
-    for p in UNIT_PATTERNS:
-        m = re.search(p, line)
-        if m:
-            raw = m.group(0).replace(" ", "").lower()
-            return UNIT_CLEAN.get(raw, raw)
-    return None
-
-
-# -----------------------------------------------------------------------------
-# Lignes à partir des boxes
-# -----------------------------------------------------------------------------
+# --- Groupage en lignes à partir des boxes Tesseract ---
 
 def _group_lines(boxes: List[dict], tol: int = 12):
     lines = []
@@ -114,9 +73,7 @@ def _find_tsh_line(lines):
     return candidates[0] if candidates else None
 
 
-# -----------------------------------------------------------------------------
-# Colonnes et valeurs
-# -----------------------------------------------------------------------------
+# --- Colonnes & valeurs ---
 
 def _cluster_columns(lines):
     xs = []
@@ -157,9 +114,7 @@ def _extract_column_values(line, col_centers):
     return out
 
 
-# -----------------------------------------------------------------------------
-# Intervalles de référence (min-max)
-# -----------------------------------------------------------------------------
+# --- Intervalles de référence (min-max) ---
 
 INTERVAL_REGEX = re.compile(
     r"(\d+[\.,]?\d*)\s*(?:-|à|;)\s*(\d+[\.,]?\d*)"
@@ -176,8 +131,7 @@ def _extract_reference_interval(text: str):
         try:
             a = float(a.replace(",", "."))
             b = float(b.replace(",", "."))
-            # bornes plausibles pour TSH
-            if 0 < a < b < 50:
+            if 0 < a < b < 50:  # bornes plausibles TSH
                 intervals.append((a, b))
         except:
             pass
@@ -185,35 +139,32 @@ def _extract_reference_interval(text: str):
     if not intervals:
         return None, None
 
-    # On prend l'intervalle avec la plus petite borne (souvent la plage 0.4–4.0)
     intervals.sort(key=lambda x: x[0])
     return intervals[0]
 
 
-# -----------------------------------------------------------------------------
-# Fonction principale premium
-# -----------------------------------------------------------------------------
+# --- Fonction principale simplifiée ---
 
 def premium_parse_tsh(raw_text: str, ocr_boxes: List[dict]) -> Optional[ParsedTSH]:
-    # 0. Sanity-check TSH dans le texte global (tolérant)
+    # 0. Check présence TSH (souple)
     if not _contains_tsh(raw_text):
         return ParsedTSH(False, None, None, None, None, "low", "TSH_NOT_FOUND")
 
-    # 1. Reconstituer les lignes
+    # 1. Lignes & ligne TSH
     lines = _group_lines(ocr_boxes)
     tsh_line = _find_tsh_line(lines)
 
     if not tsh_line:
         return ParsedTSH(False, None, None, None, None, "low", "TSH_NOT_FOUND")
 
-    # 2. Colonnes
+    # 2. Colonnes & valeurs
     col_centers = _cluster_columns(lines)
     col_vals = _extract_column_values(tsh_line, col_centers)
 
     if not col_vals:
         return ParsedTSH(False, None, None, None, None, "low", "TSH_NOT_FOUND")
 
-    # 3. Première colonne numérique = TSH actuelle
+    # 3. Première colonne numérique = valeur actuelle
     first_col = min(col for col, _ in col_vals)
     main_vals = [v for col, v in col_vals if col == first_col]
 
@@ -222,21 +173,19 @@ def premium_parse_tsh(raw_text: str, ocr_boxes: List[dict]) -> Optional[ParsedTS
 
     tsh_value = main_vals[0]
 
-    # 4. Unité : d'abord sur la ligne TSH, puis fallback texte global
+    # 4. Intervalles de référence (ligne TSH puis texte global)
     line_text = _merge_line(tsh_line)
-    unit = _find_unit(line_text) or _find_unit(raw_text)
-
-    # 5. Intervalles : d'abord dans la ligne TSH, sinon dans le texte
     ref_min, ref_max = _extract_reference_interval(line_text)
     if ref_min is None or ref_max is None:
         ref_min, ref_max = _extract_reference_interval(raw_text)
 
-    # 6. Confiance
+    # 5. Confiance & unité fixe
+    unit = "mUI/L"  # tu peux la changer ici si besoin
     confidence = "high"
-    if not unit or ref_min is None or ref_max is None:
+    if ref_min is None or ref_max is None:
         confidence = "medium"
 
-    # sécurité clinique
+    # 6. Sécurité clinique
     if tsh_value < 0 or tsh_value > 150:
         return ParsedTSH(False, None, None, None, None, "low", "TSH_NOT_FOUND")
 
