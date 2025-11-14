@@ -103,48 +103,67 @@ def _line_contains_tsh_keyword(line_lower: str) -> bool:
 def _extract_tsh_from_block(block: str) -> Optional[TSHParseResult]:
     """
     Extrait la TSH à partir d'un "bloc" de texte (ligne TSH + éventuelle ligne suivante).
+
+    Stratégie :
+    - on parcourt tous les nombres de la ligne ;
+    - pour chaque nombre on regarde s'il y a une unité de TSH dans les caractères qui suivent ;
+    - on choisit le premier nombre avec une unité valide ;
+    - à défaut, on retombe sur le premier nombre plausible.
     """
 
     logger.debug("[TSH] Extracting from block: %s", block)
 
-    # 1. Chercher la première valeur numérique
-    value_match = FLOAT_RE.search(block)
-    if not value_match:
+    matches = list(FLOAT_RE.finditer(block))
+    if not matches:
         logger.debug("[TSH] No numeric value found in block.")
         return None
 
-    value_str = value_match.group(1).replace(",", ".")
-    try:
-        value = float(value_str)
-    except ValueError:
-        logger.debug("[TSH] Could not convert value '%s' to float.", value_str)
-        return None
+    candidate_result: Optional[TSHParseResult] = None
 
-    # Contrôle très large (juste pour filtrer les OCR complètement absurdes)
-    if value < 0 or value > 1000:
-        logger.debug("[TSH] Ignoring implausible TSH value: %s", value)
-        return None
+    # 1. On cherche d'abord un nombre qui a une unité de TSH à proximité
+    for m in matches:
+        value_str = m.group(1).replace(",", ".")
+        try:
+            value = float(value_str)
+        except ValueError:
+            continue
 
-    # 2. Chercher une unité proche de la valeur
-    unit = _find_unit_near_value(block, value_match.start(), value_match.end())
+        if value < 0 or value > 1000:
+            continue
 
-    # 3. Chercher une plage de référence
-    ref_min, ref_max = _find_reference_range(block)
+        unit = _find_unit_near_value(block, m.start(), m.end())
+        ref_min, ref_max = _find_reference_range(block)
+        confidence = _compute_confidence(value, unit, ref_min, ref_max)
 
-    # 4. Déterminer un score de confiance simple
-    confidence = _compute_confidence(value, unit, ref_min, ref_max)
+        # Si on trouve une unité, c'est notre meilleur candidat
+        if unit is not None:
+            result = TSHParseResult(
+                tsh_value=value,
+                tsh_unit=unit,
+                ref_min=ref_min,
+                ref_max=ref_max,
+                confidence=confidence,
+            )
+            logger.debug("[TSH] Parsed result with unit: %s", result)
+            return result
 
-    result = TSHParseResult(
-        tsh_value=value,
-        tsh_unit=unit,
-        ref_min=ref_min,
-        ref_max=ref_max,
-        confidence=confidence,
-    )
+        # On garde quand même un candidat sans unité au cas où
+        if candidate_result is None:
+            candidate_result = TSHParseResult(
+                tsh_value=value,
+                tsh_unit=None,
+                ref_min=ref_min,
+                ref_max=ref_max,
+                confidence=confidence,
+            )
 
-    logger.debug("[TSH] Parsed result: %s", result)
-    return result
+    # 2. Si aucun nombre n’a d’unité claire, on renvoie le premier candidat plausible
+    if candidate_result is not None:
+        logger.debug("[TSH] Parsed result without explicit unit: %s", candidate_result)
+        return candidate_result
 
+    logger.debug("[TSH] No plausible TSH value in block.")
+    return None
 
 def _find_unit_near_value(block: str, start_idx: int, end_idx: int) -> Optional[str]:
     """
