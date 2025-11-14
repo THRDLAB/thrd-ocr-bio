@@ -7,6 +7,10 @@ import shutil
 import os
 import logging
 
+# Import du vrai OCR
+from ocr_engine import extract_text_from_file
+from parsers.tsh import parse_tsh
+
 # ---------------------------------------------------------------------
 # Config & init
 # ---------------------------------------------------------------------
@@ -63,12 +67,6 @@ class HealthResponse(BaseModel):
 # ---------------------------------------------------------------------
 # Utils internes (stubs pour l’instant)
 # ---------------------------------------------------------------------
-
-def extract_text_from_file(path: str) -> str:
-    
-    from ocr_engine import extract_text_from_file
-    logger.info(f"[extract_text_from_file] Called with path={path}")
-    return ""
 
 
 def parse_tsh(text: str) -> Optional[TSHParseResult]:
