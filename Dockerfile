@@ -9,6 +9,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsm6 \
     libxext6 \
     libxrender1 \
+    libjpeg-dev \
+    libpng-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -16,8 +18,9 @@ WORKDIR /app
 # ===== Requirements =====
 COPY requirements.txt .
 
-# numpy must be installed BEFORE opencv
+# Must install numpy BEFORE opencv
 RUN pip install --no-cache-dir numpy==1.26.4
+
 RUN pip install --no-cache-dir -r requirements.txt
 
 # ===== App files =====
@@ -25,4 +28,5 @@ COPY . .
 
 EXPOSE 8000
 
+# ===== Start server =====
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
