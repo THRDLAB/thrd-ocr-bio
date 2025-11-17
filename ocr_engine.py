@@ -8,6 +8,31 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 
+def preprocess_for_bio(im: Image.Image) -> Image.Image:
+    """Pré-traitement spécifique pour les comptes-rendus biologiques."""
+
+    # On conserve uniquement le bas de la page où se situent les examens.
+    w, h = im.size
+    cropped = im.crop((0, int(h * 0.35), w, h))
+
+    # Niveaux de gris + autocontraste pour améliorer la lisibilité.
+    gray = ImageOps.grayscale(cropped)
+    gray = ImageOps.autocontrast(gray)
+
+    # Légère accentuation pour faire ressortir le texte.
+    gray = gray.filter(ImageFilter.SHARPEN)
+
+    # Redimensionnement pour avoir un plus grand côté proche de 2000 px.
+    max_side = 2000
+    w2, h2 = gray.size
+    max_current_side = max(w2, h2)
+    if max_current_side < max_side:
+        resize_ratio = max_side / max_current_side
+        gray = gray.resize((int(w2 * resize_ratio), int(h2 * resize_ratio)), Image.LANCZOS)
+
+    return gray
+
+
 @dataclass
 class OCRResult:
     raw_text: str
@@ -56,6 +81,9 @@ def premium_extract_text(path: str) -> Optional[OCRResult]:
         img = _load_image(path)
     except Exception:
         return None
+
+    # Prétraitement spécifique bio
+    img = preprocess_for_bio(img)
 
     # Prétraitement simple
     img = _resize_if_needed(img, max_side=1400)
