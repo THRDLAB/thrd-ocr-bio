@@ -18,9 +18,6 @@ WORKDIR /app
 # ===== Requirements =====
 COPY requirements.txt .
 
-# Must install numpy BEFORE opencv
-RUN pip install --no-cache-dir numpy==1.26.4
-
 RUN pip install --no-cache-dir -r requirements.txt
 
 # ===== App files =====
