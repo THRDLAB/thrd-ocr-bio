@@ -6,6 +6,9 @@ from PIL import Image, ImageOps, ImageFilter
 import pytesseract
 from pytesseract import Output
 
+TESS_LANG = "fra+eng"
+TESS_BASE_CONFIG = "-c preserve_interword_spaces=1 tessedit_do_invert=0"
+
 
 @dataclass
 class OCRResult:
@@ -58,19 +61,26 @@ def preprocess_for_bio(im: Image.Image) -> Image.Image:
 def _run_tesseract_string(img: Image.Image, psm: int = 6) -> str:
     """
     Exécution Tesseract pour récupérer le texte brut.
+    On force :
+      - OEM 1 (LSTM only)
+      - PSM adapté (par défaut 6)
+      - conservation des espaces
+      - pas d'inversion automatique noir/blanc
     """
-    config = f"--psm {psm} --oem 3"
-    return pytesseract.image_to_string(img, lang="fra+eng", config=config)
+    config = f"--oem 1 --psm {psm} {TESS_BASE_CONFIG}"
+    return pytesseract.image_to_string(img, lang=TESS_LANG, config=config)
+
 
 
 def _run_tesseract_data(img: Image.Image, psm: int = 6) -> List[dict]:
     """
     Exécution Tesseract pour récupérer les boxes (image_to_data).
+    Même config que pour le texte pour rester cohérent.
     """
-    config = f"--psm {psm} --oem 3"
+    config = f"--oem 1 --psm {psm} {TESS_BASE_CONFIG}"
     data = pytesseract.image_to_data(
         img,
-        lang="fra+eng",
+        lang=TESS_LANG,
         config=config,
         output_type=Output.DICT,
     )
@@ -91,6 +101,7 @@ def _run_tesseract_data(img: Image.Image, psm: int = 6) -> List[dict]:
             }
         )
     return boxes
+
 
 
 def premium_extract_text(path: str) -> Optional[OCRResult]:
