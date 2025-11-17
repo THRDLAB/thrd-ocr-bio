@@ -1,7 +1,7 @@
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple, List
 
 
 @dataclass
@@ -15,117 +15,174 @@ class ParsedTSH:
     error: Optional[str]
 
 
+# =========================================================
+# Helpers
+# =========================================================
+
+NUM = r"\d+(?:[.,]\d+)?"
+NUM_DEC = r"\d+[.,]\d+"
+
+
 def _normalize(text: str) -> str:
-    # Minuscules + accents retirés + espaces normalisés.
-    if not text:
-        return ""
+    """
+    Normalisation assez douce :
+    - minuscule
+    - suppression des accents
+    - on garde chiffres / lettres / . , - / : >
+    - espaces compactés
+    """
     text = text.lower()
     text = "".join(
         c for c in unicodedata.normalize("NFD", text)
         if unicodedata.category(c) != "Mn"
     )
+    # on garde uniquement les caractères utiles au parsing
+    text = re.sub(r"[^a-z0-9.,<>:=/\-]+", " ", text)
     text = re.sub(r"\s+", " ", text)
-    return text
+    return text.strip()
 
 
 def _to_float(s: str) -> Optional[float]:
     try:
-        s = s.replace(",", ".")
-        return float(s)
+        return float(s.replace(",", "."))
     except Exception:
         return None
 
 
-def _extract_ref_interval(context: str) -> tuple[Optional[float], Optional[float]]:
-    # Cherche un intervalle du type "0.27 ... 4.20" dans un bout de texte.
-    if not context:
-        return None, None
-    ctx = context.replace(",", ".")
-    m = re.search(r"([0-9]+(?:\.[0-9]+)?)\D+([0-9]+(?:\.[0-9]+)?)", ctx)
+def _scale_ref(m1: float, m2: float) -> Tuple[float, float]:
+    """
+    Corrige grossièrement les ref type "0400 - 4,000" issues de l'OCR :
+    tant que la valeur max est très grande, on divise par 10.
+    On s'arrête quand max <= 50 ou après quelques itérations.
+    """
+    for _ in range(3):
+        if max(m1, m2) <= 50:
+            break
+        m1 /= 10.0
+        m2 /= 10.0
+    if m1 > m2:
+        m1, m2 = m2, m1
+    return m1, m2
+
+
+def _extract_ref_interval(snippet: str) -> Tuple[Optional[float], Optional[float]]:
+    """
+    Cherche un intervalle de référence dans un bout de texte :
+    - "0,4 - 4,0"
+    - "0,4 4,0"
+    - gère les cas OCR bizarres comme "0400 - 4,000"
+    """
+    norm = _normalize(snippet)
+
+    # pattern classique "min - max"
+    m = re.search(rf"({NUM})\s*[-–—aàto]+\s*({NUM})", norm)
+    if not m:
+        # fallback "min   max"
+        m = re.search(rf"({NUM})\s+({NUM})", norm)
     if not m:
         return None, None
-    a = _to_float(m.group(1))
-    b = _to_float(m.group(2))
-    if a is None or b is None:
+
+    m1 = _to_float(m.group(1))
+    m2 = _to_float(m.group(2))
+    if m1 is None or m2 is None:
         return None, None
-    if a > b:
-        a, b = b, a
-    return a, b
 
-
-# 1) Cas standard : "tsh .... 7,34 mUI/l"
-#    -> on autorise jusqu'à 80 caractères non numériques entre TSH et la valeur
-TSH_DIRECT_RE = re.compile(
-    r"tsh\D{0,80}([0-9]+(?:[.,][0-9]+)?)\s*"
-    r"(m[uµ]i/?l|mui/?l|µui/?l|ui/ml|ui/?l|m?ui/l)?",
-    re.IGNORECASE,
-)
-
-# 2) Valeur + unité générique (fallback + macro-TSH).
-#    On ajoute des variantes OCR foireuses comme "mut/2", "mut/l".
-VALUE_UNIT_RE = re.compile(
-    r"([0-9]+(?:[.,][0-9]+)?)\s*"
-    r"(m[uµ]i/?l|mui/?l|µui/?l|ui/ml|ui/?l|mia|mut/2|mut/l|mul/l)",
-    re.IGNORECASE,
-)
+    m1, m2 = _scale_ref(m1, m2)
+    return m1, m2
 
 
 def _conf(level: str) -> str:
-    if level in {"high", "medium", "low"}:
-        return level
-    return "low"
+    return level
 
+
+def _first_value(ctx: str) -> Tuple[Optional[float], Optional[re.Match]]:
+    """
+    Renvoie la première valeur plausible dans un contexte :
+    - on privilégie les nombres avec virgule/point (3,54 ; 0.40)
+    - sinon on prend le premier entier.
+    """
+    m = re.search(NUM_DEC, ctx)
+    if m:
+        return _to_float(m.group(0)), m
+    m = re.search(NUM, ctx)
+    if m:
+        return _to_float(m.group(0)), m
+    return None, None
+
+
+# =========================================================
+# Public API
+# =========================================================
 
 def premium_parse_tsh(raw_text: str, boxes=None) -> ParsedTSH:
     """
-    Parser TSH tolérant les OCR foireux.
-
-    Stratégie :
-      1. TSH direct → "high"
-      2. 'macro-tsh' → valeur + unité juste avant → "medium"
-      3. Première valeur + unité plausible → "low"
+    Parser TSH "premium" :
+    - détecte TSH / T.S.H / T S H, "tsh ultra sensible", "3eme génération", etc.
+    - récupère la première valeur plausible après le marqueur
+    - essaie de trouver un intervalle de référence dans la foulée
     """
-    if not raw_text or not raw_text.strip():
-        return ParsedTSH(False, None, None, None, None, None, "TSH_NOT_FOUND")
+    if not raw_text:
+        return ParsedTSH(False, None, None, None, None, None, "EMPTY_TEXT")
 
     norm = _normalize(raw_text)
 
-    # ---------- 1) Cas direct TSH ----------
-    m = TSH_DIRECT_RE.search(norm)
-    if m:
-        value = _to_float(m.group(1))
-        if value is not None and 0 <= value <= 150:
-            unit = "mUI/L"  # on normalise l'unité, même si l'OCR l'a mal lue
-            start = max(0, m.start())
-            end = min(len(norm), m.end() + 80)
-            ref_min, ref_max = _extract_ref_interval(norm[start:end])
-            return ParsedTSH(True, value, unit, ref_min, ref_max, _conf("high"), None)
+    candidates: List[ParsedTSH] = []
 
-    # ---------- 2) Cas "macro-tsh" ----------
-    idx_macro = norm.find("macro-tsh")
-    if idx_macro != -1:
-        before = norm[:idx_macro]
-        candidates = list(VALUE_UNIT_RE.finditer(before))
-        if candidates:
-            last = candidates[-1]
-            value = _to_float(last.group(1))
-            if value is not None and 0 <= value <= 150:
-                unit = "mUI/L"
-                start = max(0, last.start())
-                end = min(len(norm), last.end() + 80)
-                ref_min, ref_max = _extract_ref_interval(norm[start:end])
-                return ParsedTSH(True, value, unit, ref_min, ref_max, _conf("medium"), None)
+    # 1) Recherche explicite autour de TSH
+    #    on gère : "TSH", "T.S.H", "T S H", "thyreostimuline", etc.
+    tsh_pattern = re.compile(
+        r"(t\s*\.?\s*s\s*\.?\s*h|tsh|thyreostimuline|thyrotrop[eie]ne)",
+        re.IGNORECASE,
+    )
 
-    # ---------- 3) Fallback général ----------
-    m2 = VALUE_UNIT_RE.search(norm)
-    if m2:
-        value = _to_float(m2.group(1))
-        if value is not None and 0 <= value <= 150:
-            unit = "mUI/L"
-            start = max(0, m2.start())
-            end = min(len(norm), m2.end() + 80)
-            ref_min, ref_max = _extract_ref_interval(norm[start:end])
-            return ParsedTSH(True, value, unit, ref_min, ref_max, _conf("low"), None)
+    for m in tsh_pattern.finditer(norm):
+        # contexte après le mot TSH
+        start = max(0, m.end())
+        ctx = norm[start:start + 160]
 
-    # ---------- Rien trouvé ----------
+        value, mv = _first_value(ctx)
+        if mv is None or value is None:
+            continue
+
+        # bornes "plausibles" pour une TSH
+        if not (0 <= value <= 150):
+            continue
+
+        # valeurs de référence dans ce qui suit
+        ref_min, ref_max = _extract_ref_interval(ctx[mv.end():])
+
+        candidates.append(
+            ParsedTSH(
+                ok=True,
+                value=value,
+                unit="mUI/L",  # on fixe l'unité, plus simple et plus robuste
+                ref_min=ref_min,
+                ref_max=ref_max,
+                confidence=_conf("high" if ref_min is not None else "medium"),
+                error=None,
+            )
+        )
+
+    if candidates:
+        # on garde le candidat avec la meilleure "confidence"
+        order = {"high": 2, "medium": 1, "low": 0}
+        candidates.sort(key=lambda c: order.get(c.confidence or "", 0), reverse=True)
+        return candidates[0]
+
+    # 2) Fallback très large : n'importe quelle valeur "raisonnable"
+    #    dans tout le texte.
+    any_value, m_any = _first_value(norm)
+    if m_any is not None and any_value is not None and 0 <= any_value <= 150:
+        ref_min, ref_max = _extract_ref_interval(norm[m_any.end():m_any.end() + 80])
+        return ParsedTSH(
+            ok=True,
+            value=any_value,
+            unit="mUI/L",
+            ref_min=ref_min,
+            ref_max=ref_max,
+            confidence=_conf("low"),
+            error=None,
+        )
+
+    # 3) Rien trouvé
     return ParsedTSH(False, None, None, None, None, None, "TSH_NOT_FOUND")
