@@ -16,7 +16,7 @@ class ParsedTSH:
 
 
 def _normalize(text: str) -> str:
-    """Minuscules + accents retirés + espaces normalisés."""
+    # Minuscules + accents retirés + espaces normalisés.
     if not text:
         return ""
     text = text.lower()
@@ -37,7 +37,7 @@ def _to_float(s: str) -> Optional[float]:
 
 
 def _extract_ref_interval(context: str) -> tuple[Optional[float], Optional[float]]:
-    """Cherche un intervalle type '0.27 ... 4.20' dans un bout de texte."""
+    # Cherche un intervalle du type "0.27 ... 4.20" dans un bout de texte.
     if not context:
         return None, None
     ctx = context.replace(",", ".")
@@ -53,17 +53,19 @@ def _extract_ref_interval(context: str) -> tuple[Optional[float], Optional[float
     return a, b
 
 
-# 1) Cas standard : "tsh ... 7,34 mUI/l"
+# 1) Cas standard : "tsh .... 7,34 mUI/l"
+#    -> on autorise jusqu'à 80 caractères non numériques entre TSH et la valeur
 TSH_DIRECT_RE = re.compile(
-    r"tsh[^0-9]{0,30}([0-9]+(?:[.,][0-9]+)?)\s*"
+    r"tsh\D{0,80}([0-9]+(?:[.,][0-9]+)?)\s*"
     r"(m[uµ]i/?l|mui/?l|µui/?l|ui/ml|ui/?l|m?ui/l)?",
     re.IGNORECASE,
 )
 
-# 2) Valeur + unité générique (fallback + macro-TSH)
+# 2) Valeur + unité générique (fallback + macro-TSH).
+#    On ajoute des variantes OCR foireuses comme "mut/2", "mut/l".
 VALUE_UNIT_RE = re.compile(
     r"([0-9]+(?:[.,][0-9]+)?)\s*"
-    r"(m[uµ]i/?l|mui/?l|µui/?l|ui/ml|ui/?l|mia)",
+    r"(m[uµ]i/?l|mui/?l|µui/?l|ui/ml|ui/?l|mia|mut/2|mut/l|mul/l)",
     re.IGNORECASE,
 )
 
@@ -93,7 +95,7 @@ def premium_parse_tsh(raw_text: str, boxes=None) -> ParsedTSH:
     if m:
         value = _to_float(m.group(1))
         if value is not None and 0 <= value <= 150:
-            unit = "mUI/L"
+            unit = "mUI/L"  # on normalise l'unité, même si l'OCR l'a mal lue
             start = max(0, m.start())
             end = min(len(norm), m.end() + 80)
             ref_min, ref_max = _extract_ref_interval(norm[start:end])
