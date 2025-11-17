@@ -2,8 +2,8 @@
  import pytesseract
  from pytesseract import Output
  from PIL import Image, ImageOps, ImageFilter
- import numpy as np
- import cv2
+-import numpy as np
+-import cv2
  from dataclasses import dataclass
  from typing import List, Optional
  
