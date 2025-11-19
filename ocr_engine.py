@@ -214,3 +214,79 @@ def premium_extract_text(path: str) -> Optional[OCRResult]:
         return None
 
     return OCRResult(raw_text=raw_text, boxes=boxes)
+
+def optimum_extract_text(path: str) -> Optional[OCRResult]:
+    """
+    Version 'optimum' pour les bilans compliqués :
+      - upscale de l'image
+      - binarisation plus agressive
+      - récupération du texte même avec des conf basses
+    Plus lente, mais utile en dernier recours.
+    """
+    try:
+        img = _load_image(path)
+    except Exception as e:
+        print("OCR-OPTIMUM ERROR: failed to load image:", e)
+        print(traceback.format_exc())
+        return None
+
+    # 1) Upscale x1.5 pour les polices petites
+    try:
+        w, h = img.size
+        scale = 1.5
+        img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+    except Exception as e:
+        print("OCR-OPTIMUM ERROR: upscale failed:", e)
+        print(traceback.format_exc())
+
+    # 2) Prétraitement plus agressif : niveaux de gris + autocontrast + seuil
+    try:
+        gray = ImageOps.grayscale(img)
+        gray = ImageOps.autocontrast(gray)
+
+        # simple binarisation globale
+        def _threshold(p):
+            return 255 if p > 160 else 0
+        bin_img = gray.point(_threshold)
+    except Exception as e:
+        print("OCR-OPTIMUM ERROR: binarization failed:", e)
+        print(traceback.format_exc())
+        bin_img = img  # fallback
+
+    # 3) OCR texte brut sans filtrer par conf
+    try:
+        raw_text = _run_tesseract_string(bin_img, psm=6)
+    except Exception as e:
+        print("OCR-OPTIMUM ERROR: image_to_string failed:", e)
+        print(traceback.format_exc())
+        raw_text = ""
+
+    raw_text = raw_text or ""
+
+    # 4) OCR avec boxes mais conf très bas (ex. >= 20)
+    try:
+        data = _run_tesseract_data(bin_img, psm=6)
+        boxes = []
+        for i, txt in enumerate(data["text"]):
+            if not txt or not txt.strip():
+                continue
+            conf = float(data["conf"][i])
+            if conf < 20:   # seuil plus bas que le premium
+                continue
+            x, y, w, h = (
+                int(data["left"][i]),
+                int(data["top"][i]),
+                int(data["width"][i]),
+                int(data["height"][i]),
+            )
+            boxes.append(OCRBox(text=txt, conf=conf, x=x, y=y, w=w, h=h))
+    except Exception as e:
+        print("OCR-OPTIMUM ERROR: image_to_data failed:", e)
+        print(traceback.format_exc())
+        boxes = []
+
+    if not raw_text.strip() and not boxes:
+        return None
+
+    return OCRResult(raw_text=raw_text, boxes=boxes)
+
