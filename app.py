@@ -5,7 +5,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from ocr_engine import premium_extract_text
+from ocr_engine import premium_extract_text, light_extract_text
 from parsers.tsh import premium_parse_tsh
 
 
@@ -74,7 +74,7 @@ async def ocr_tsh(file: UploadFile = File(...)):
     """
     Full OCR pipeline:
     1. Save file
-    2. Multi-variant OCR (premium)
+    2. Multi-variant OCR (light en first puis premium)
     3. Premium TSH parser
     4. JSON response simplified for Bubble
     """
@@ -84,7 +84,25 @@ async def ocr_tsh(file: UploadFile = File(...)):
     # 1. Save file
     tmp_path = save_temp_file(file)
 
-    # 2. Run OCR
+    # 2. Premier passage : OCR LIGHT
+    ocr = light_extract_text(tmp_path)
+    parsed = None
+
+    if ocr:
+        parsed = premium_parse_tsh(ocr.raw_text, ocr.boxes)
+        if parsed.ok:
+            # Succès direct en mode light → on renvoie tout de suite
+            return TSHResponse(
+                ok=True,
+                tsh_value=parsed.value,
+                tsh_unit=parsed.unit,
+                ref_min=parsed.ref_min,
+                ref_max=parsed.ref_max,
+                confidence=parsed.confidence,
+                raw_text=ocr.raw_text,
+            )
+
+    # 3. Fallback : OCR PREMIUM (texte + boxes)
     ocr = premium_extract_text(tmp_path)
     if not ocr:
         return TSHResponse(
@@ -93,7 +111,6 @@ async def ocr_tsh(file: UploadFile = File(...)):
             raw_text=None
         )
 
-    # 3. Parse TSH
     parsed = premium_parse_tsh(ocr.raw_text, ocr.boxes)
     if not parsed.ok:
         return TSHResponse(
@@ -102,7 +119,7 @@ async def ocr_tsh(file: UploadFile = File(...)):
             raw_text=ocr.raw_text
         )
 
-    # 4. Build response
+    # 4. Réponse finale (succès premium)
     return TSHResponse(
         ok=True,
         tsh_value=parsed.value,
