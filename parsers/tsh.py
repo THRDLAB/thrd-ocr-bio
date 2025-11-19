@@ -3,6 +3,10 @@ from dataclasses import dataclass
 from typing import Optional, List, Tuple
 
 
+# --------------------------------------------------------------------
+# Structures de données
+# --------------------------------------------------------------------
+
 @dataclass
 class ParsedTSH:
     ok: bool
@@ -25,30 +29,23 @@ class TSHMatch:
     raw_segment: str
 
 
+# --------------------------------------------------------------------
+# Helpers
+# --------------------------------------------------------------------
+
 def _normalize_text(text: str) -> str:
-    """
-    Normalisation légère du texte OCR :
-    - homogénéise les retours à la ligne
-    - réduit les espaces multiples
-    """
     if not text:
         return ""
     text = text.replace("\r", "\n")
-    # Réduire les suites d'espaces / tabs
     text = re.sub(r"[ \t\f\v]+", " ", text)
-    # Réduire les multiples sauts de ligne
     text = re.sub(r"\n+", "\n", text)
     return text
 
 
 def _to_float(s: Optional[str]) -> Optional[float]:
-    """
-    Convertit une chaîne avec virgule ou point en float Python.
-    Renvoie None si non convertible.
-    """
     if not s:
         return None
-    s = s.replace(" ", "").replace("\u00a0", "")  # espaces normaux + insécables
+    s = s.replace(" ", "").replace("\u00a0", "")
     s = s.replace(",", ".")
     try:
         return float(s)
@@ -56,58 +53,55 @@ def _to_float(s: Optional[str]) -> Optional[float]:
         return None
 
 
-# ---------------------------------------------------------------------------
-# Motifs regex pour le bloc TSH complet
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------
+# REGEX solides TSH
+# --------------------------------------------------------------------
 
-# Label TSH : gère plusieurs variantes
 TSH_LABEL = r"""
-\b(?:                               # frontière de mot
-    t\s*\.?\s*s\s*\.?\s*h           # formes décomposées "t s h"
-  | tsh(?:\s*us)?                   # TSH, TSHus
-  | tsh\s*ultra\s*sensible          # TSH ultra sensible
-  | tsh\s*3(?:e|ème)\s*gen          # TSH 3e/3ème GEN
-  | thyr[eé]ostimuline              # thyréostimuline / thyreostimuline
-  | thyrotrop(?:ine|e)              # thyrotropine / thyrotrope
+\b(?:
+    (?<![a-z0-9])t\s*\.?\s*s\s*\.?\s*h(?![a-z0-9])   # formes décomposées exactes T S H
+  | tsh(?:\s*us)?                                    # TSH, TSHus
+  | tsh\s*ultra\s*sensible                           # TSH ultra sensible
+  | tsh\s*3(?:e|ème)\s*gen                            # TSH 3e/3ème GEN
+  | thyr[eé]ostimuline                                # thyréostimuline
+  | thyrotrop(?:ine|e)                                # thyrotropine
 )\b
 """
 
-# Nombre avec virgule ou point
 NUMBER = r"[+-]?\d+(?:[.,]\d+)?"
 
-# Unités classiques de TSH (on reste permissif)
 TSH_UNIT = r"(?:m ?UI/?L|µ ?UI/?L|u ?UI/?mL|mIU/?L|mU/?L|pUI/?mL|UI/?L|mUI|µUI|uUI)?"
 
-# Regex principale pour un bloc TSH : label + valeur + (unit) + (plage ref)
+
 TSH_BLOCK_REGEX = re.compile(
     rf"""
-    (?P<label>{TSH_LABEL})               # 1. Label TSH
+    (?P<label>{TSH_LABEL})
 
-    [^0-9\n]{{0,60}}                      # un peu de bruit (points, parenthèses, etc.)
+    [^0-9\n]{{0,60}}                      # bruit
 
-    (?P<value>{NUMBER})                  # 2. Valeur TSH
+    (?P<value>{NUMBER})
 
     \s*
-    (?P<unit>{TSH_UNIT})                 # 3. Unité (optionnelle)
+    (?P<unit>{TSH_UNIT})
 
-    # 4. Plage de référence (optionnelle)
-    (?:                                  # groupe non capturant pour la plage
-        [^\d\n]{{0,20}}                  # petit bruit (ex: ' ', ':', etc.)
-        (?P<ref_min>{NUMBER})            # borne basse
+    (?:                                  # Plage optionnelle
+        [^\d\n]{{0,20}}
+        (?P<ref_min>{NUMBER})
         \s*
-        (?:-|–|—|~|à|a|>|<|≤|>=|to|et|&) # séparateur très permissif
+        (?:-|–|—|~|à|a|>|<|≤|>=|to|et|&)
         \s*
-        (?P<ref_max>{NUMBER})            # borne haute
+        (?P<ref_max>{NUMBER})
     )?
     """,
     re.IGNORECASE | re.VERBOSE | re.MULTILINE,
 )
 
 
+# --------------------------------------------------------------------
+# Extraction candidats
+# --------------------------------------------------------------------
+
 def _find_tsh_candidates(raw_text: str) -> List[TSHMatch]:
-    """
-    Extrait tous les blocs candidats TSH dans le texte OCR.
-    """
     text = _normalize_text(raw_text)
     candidates: List[TSHMatch] = []
 
@@ -122,7 +116,6 @@ def _find_tsh_candidates(raw_text: str) -> List[TSHMatch]:
             continue
 
         start, end = m.span()
-        # Petit contexte autour du match pour debug éventuel
         segment = text[max(0, start - 40): min(len(text), end + 40)]
 
         candidates.append(
@@ -140,19 +133,44 @@ def _find_tsh_candidates(raw_text: str) -> List[TSHMatch]:
     return candidates
 
 
+# --------------------------------------------------------------------
+# Scoring candidats TSH : cœur du fix
+# --------------------------------------------------------------------
+
 def _score_candidate(c: TSHMatch) -> tuple:
     """
-    Calcule un score triable pour ordonner les candidats TSH.
-    Plus le score est petit, plus le candidat est "bon".
-    Critères :
-      1. Avoir une plage de référence complète (ref_min et ref_max)
-      2. Label contenant explicitement 'TSH'
-      3. Valeur cohérente avec la plage (si dispo)
+    Score triable :
+    1. Valide la plage (ou rejette)
+    2. Label solide (TSH > thyréostimuline)
+    3. Cohérence valeur/plage
+    4. Valeur physiologiquement correcte
     """
-    # 1. Plage complète ou non
-    has_range = 0 if (c.ref_min is not None and c.ref_max is not None) else 1
 
-    # 2. Qualité du label
+    # Sécurité physiologique TSH
+    if c.value < 0.001 or c.value > 100:
+        return (999, 999, 999, 999)
+
+    # Vérification plage si existante
+    if c.ref_min is not None and c.ref_max is not None:
+
+        # plages impossibles → rejet
+        if c.ref_min <= 0 or c.ref_max <= 0:
+            return (999, 999, 999, 999)
+        if c.ref_min > c.ref_max:
+            return (999, 999, 999, 999)
+        if c.ref_max < 0.05:  # trop petit = OCR raté
+            return (999, 999, 999, 999)
+
+        # cohérence valeur/plage
+        if not (c.ref_min - 0.5 <= c.value <= c.ref_max + 0.5):
+            range_penalty = 1
+        else:
+            range_penalty = 0
+    else:
+        # pas de plage → moins bon
+        range_penalty = 2
+
+    # Label strength
     label = c.label.lower()
     if "tsh" in label:
         label_penalty = 0
@@ -161,44 +179,29 @@ def _score_candidate(c: TSHMatch) -> tuple:
     else:
         label_penalty = 2
 
-    # 3. Cohérence valeur/plage (si on a la plage)
-    range_penalty = 0
-    if c.ref_min is not None and c.ref_max is not None:
-        # petite marge de tolérance à cause des approximations OCR
-        low = c.ref_min - 0.5
-        high = c.ref_max + 0.5
-        if not (low <= c.value <= high):
-            range_penalty = 1
+    # On trie selon :
+    # (a une plage?, label, cohérence, position)
+    has_range = 0 if (c.ref_min is not None and c.ref_max is not None) else 1
 
-    # On renvoie un tuple : Python triera dans cet ordre
-    return has_range, label_penalty, range_penalty
+    return (has_range, label_penalty, range_penalty)
 
 
 def pick_best_tsh_match(candidates: List[TSHMatch]) -> Optional[TSHMatch]:
-    """
-    Sélectionne le "meilleur" bloc TSH parmi tous les candidats.
-    """
     if not candidates:
         return None
 
     candidates_sorted = sorted(
         candidates,
-        key=lambda c: (*_score_candidate(c), c.span[0]),
+        key=lambda c: (*_score_candidate(c), c.span[0])
     )
     return candidates_sorted[0]
 
 
-def premium_parse_tsh(raw_text: str, boxes) -> ParsedTSH:
-    """
-    Parser principal TSH.
-    - Analyse le texte OCR brut avec une regex robuste
-    - Sélectionne le meilleur candidat via des heuristiques simples
-    - Renvoie un objet ParsedTSH avec ok/value/unit/ref_min/ref_max/confidence/error
+# --------------------------------------------------------------------
+# Parser final
+# --------------------------------------------------------------------
 
-    Paramètres :
-      raw_text : texte brut renvoyé par l'OCR
-      boxes    : boxes OCR (non utilisées pour l'instant mais gardées pour compat)
-    """
+def premium_parse_tsh(raw_text: str, boxes) -> ParsedTSH:
     text = raw_text or ""
     candidates = _find_tsh_candidates(text)
 
@@ -209,16 +212,14 @@ def premium_parse_tsh(raw_text: str, boxes) -> ParsedTSH:
     if not best:
         return ParsedTSH(ok=False, error="TSH_NOT_FOUND")
 
-    # Estimation très simple de la confiance
-    confidence = "low"
+    # Estimation de confiance
     if best.ref_min is not None and best.ref_max is not None:
-        # Valeur dans la plage => confiance élevée
         if best.ref_min - 0.5 <= best.value <= best.ref_max + 0.5:
             confidence = "high"
         else:
             confidence = "medium"
-    elif best.ref_min is not None or best.ref_max is not None:
-        confidence = "medium"
+    else:
+        confidence = "low"
 
     return ParsedTSH(
         ok=True,
