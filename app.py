@@ -110,10 +110,10 @@ async def ocr_tsh(
     """Full OCR pipeline for TSH.
 
     Steps:
-      1. Save uploaded file to /tmp
-      2. Depending on `mode`, run one or several OCR passes
-      3. Parse TSH block with premium parser
-      4. Return a simplified JSON response for Bubble
+    D'abord -> Enregistrer le fichier uploadé dans /tmp
+    En fonction du mode, exécuter un ou plusieurs niveaux d’OCR (Les fameux light, premium, optimum Thks la SNCF)
+    Analyser le bloc TSH avec le parseur premium (Seulement un lvl pour l'instant)
+    Retourner une réponse JSON simplifiée pour Bubble
 
     Modes:
       - light:    1 seul passage OCR rapide
