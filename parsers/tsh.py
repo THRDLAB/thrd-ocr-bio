@@ -1,188 +1,231 @@
 import re
-import unicodedata
 from dataclasses import dataclass
-from typing import Optional, Tuple, List
+from typing import Optional, List, Tuple
 
 
 @dataclass
 class ParsedTSH:
     ok: bool
-    value: Optional[float]
-    unit: Optional[str]
+    value: Optional[float] = None
+    unit: Optional[str] = None
+    ref_min: Optional[float] = None
+    ref_max: Optional[float] = None
+    confidence: str = "low"
+    error: Optional[str] = None
+
+
+@dataclass
+class TSHMatch:
+    label: str
+    value: float
     ref_min: Optional[float]
     ref_max: Optional[float]
-    confidence: Optional[str]   # "high" | "medium" | "low"
-    error: Optional[str]
+    unit: Optional[str]
+    span: Tuple[int, int]
+    raw_segment: str
 
 
-# =========================================================
-# Helpers
-# =========================================================
-
-NUM = r"\d+(?:[.,]\d+)?"
-NUM_DEC = r"\d+[.,]\d+"
-
-
-def _normalize(text: str) -> str:
+def _normalize_text(text: str) -> str:
     """
-    Normalisation assez douce :
-    - minuscule
-    - suppression des accents
-    - on garde chiffres / lettres / . , - / : >
-    - espaces compactés
+    Normalisation légère du texte OCR :
+    - homogénéise les retours à la ligne
+    - réduit les espaces multiples
     """
-    text = text.lower()
-    text = "".join(
-        c for c in unicodedata.normalize("NFD", text)
-        if unicodedata.category(c) != "Mn"
-    )
-    # on garde uniquement les caractères utiles au parsing
-    text = re.sub(r"[^a-z0-9.,<>:=/\-]+", " ", text)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
+    if not text:
+        return ""
+    text = text.replace("\r", "\n")
+    # Réduire les suites d'espaces / tabs
+    text = re.sub(r"[ \t\f\v]+", " ", text)
+    # Réduire les multiples sauts de ligne
+    text = re.sub(r"\n+", "\n", text)
+    return text
 
 
-def _to_float(s: str) -> Optional[float]:
+def _to_float(s: Optional[str]) -> Optional[float]:
+    """
+    Convertit une chaîne avec virgule ou point en float Python.
+    Renvoie None si non convertible.
+    """
+    if not s:
+        return None
+    s = s.replace(" ", "").replace("\u00a0", "")  # espaces normaux + insécables
+    s = s.replace(",", ".")
     try:
-        return float(s.replace(",", "."))
-    except Exception:
+        return float(s)
+    except ValueError:
         return None
 
 
-def _scale_ref(m1: float, m2: float) -> Tuple[float, float]:
+# ---------------------------------------------------------------------------
+# Motifs regex pour le bloc TSH complet
+# ---------------------------------------------------------------------------
+
+# Label TSH : gère plusieurs variantes
+TSH_LABEL = r"""
+\b(?:                               # frontière de mot
+    t\s*\.?\s*s\s*\.?\s*h           # formes décomposées "t s h"
+  | tsh(?:\s*us)?                   # TSH, TSHus
+  | tsh\s*ultra\s*sensible          # TSH ultra sensible
+  | tsh\s*3(?:e|ème)\s*gen          # TSH 3e/3ème GEN
+  | thyr[eé]ostimuline              # thyréostimuline / thyreostimuline
+  | thyrotrop(?:ine|e)              # thyrotropine / thyrotrope
+)\b
+"""
+
+# Nombre avec virgule ou point
+NUMBER = r"[+-]?\d+(?:[.,]\d+)?"
+
+# Unités classiques de TSH (on reste permissif)
+TSH_UNIT = r"(?:m ?UI/?L|µ ?UI/?L|u ?UI/?mL|mIU/?L|mU/?L|pUI/?mL|UI/?L|mUI|µUI|uUI)?"
+
+# Regex principale pour un bloc TSH : label + valeur + (unit) + (plage ref)
+TSH_BLOCK_REGEX = re.compile(
+    rf"""
+    (?P<label>{TSH_LABEL})               # 1. Label TSH
+
+    [^0-9\n]{{0,60}}                      # un peu de bruit (points, parenthèses, etc.)
+
+    (?P<value>{NUMBER})                  # 2. Valeur TSH
+
+    \s*
+    (?P<unit>{TSH_UNIT})                 # 3. Unité (optionnelle)
+
+    # 4. Plage de référence (optionnelle)
+    (?:                                  # groupe non capturant pour la plage
+        [^\d\n]{{0,20}}                  # petit bruit (ex: ' ', ':', etc.)
+        (?P<ref_min>{NUMBER})            # borne basse
+        \s*
+        (?:-|–|—|~|à|a|>|<|≤|>=|to|et|&) # séparateur très permissif
+        \s*
+        (?P<ref_max>{NUMBER})            # borne haute
+    )?
+    """,
+    re.IGNORECASE | re.VERBOSE | re.MULTILINE,
+)
+
+
+def _find_tsh_candidates(raw_text: str) -> List[TSHMatch]:
     """
-    Corrige grossièrement les ref type "0400 - 4,000" issues de l'OCR :
-    tant que la valeur max est très grande, on divise par 10.
-    On s'arrête quand max <= 50 ou après quelques itérations.
+    Extrait tous les blocs candidats TSH dans le texte OCR.
     """
-    for _ in range(3):
-        if max(m1, m2) <= 50:
-            break
-        m1 /= 10.0
-        m2 /= 10.0
-    if m1 > m2:
-        m1, m2 = m2, m1
-    return m1, m2
+    text = _normalize_text(raw_text)
+    candidates: List[TSHMatch] = []
 
+    for m in TSH_BLOCK_REGEX.finditer(text):
+        label = m.group("label") or ""
+        value = _to_float(m.group("value"))
+        ref_min = _to_float(m.group("ref_min"))
+        ref_max = _to_float(m.group("ref_max"))
+        unit = (m.group("unit") or "").strip() or None
 
-def _extract_ref_interval(snippet: str) -> Tuple[Optional[float], Optional[float]]:
-    """
-    Cherche un intervalle de référence dans un bout de texte :
-    - "0,4 - 4,0"
-    - "0,4 4,0"
-    - gère les cas OCR bizarres comme "0400 - 4,000"
-    """
-    norm = _normalize(snippet)
-
-    # pattern classique "min - max"
-    m = re.search(rf"({NUM})\s*[-–—aàto]+\s*({NUM})", norm)
-    if not m:
-        # fallback "min   max"
-        m = re.search(rf"({NUM})\s+({NUM})", norm)
-    if not m:
-        return None, None
-
-    m1 = _to_float(m.group(1))
-    m2 = _to_float(m.group(2))
-    if m1 is None or m2 is None:
-        return None, None
-
-    m1, m2 = _scale_ref(m1, m2)
-    return m1, m2
-
-
-def _conf(level: str) -> str:
-    return level
-
-
-def _first_value(ctx: str) -> Tuple[Optional[float], Optional[re.Match]]:
-    """
-    Renvoie la première valeur plausible dans un contexte :
-    - on privilégie les nombres avec virgule/point (3,54 ; 0.40)
-    - sinon on prend le premier entier.
-    """
-    m = re.search(NUM_DEC, ctx)
-    if m:
-        return _to_float(m.group(0)), m
-    m = re.search(NUM, ctx)
-    if m:
-        return _to_float(m.group(0)), m
-    return None, None
-
-
-# =========================================================
-# Public API
-# =========================================================
-
-def premium_parse_tsh(raw_text: str, boxes=None) -> ParsedTSH:
-    """
-    Parser TSH "premium" :
-    - détecte TSH / T.S.H / T S H, "tsh ultra sensible", "3eme génération", etc.
-    - récupère la première valeur plausible après le marqueur
-    - essaie de trouver un intervalle de référence dans la foulée
-    """
-    if not raw_text:
-        return ParsedTSH(False, None, None, None, None, None, "EMPTY_TEXT")
-
-    norm = _normalize(raw_text)
-
-    candidates: List[ParsedTSH] = []
-
-    # 1) Recherche explicite autour de TSH
-    #    on gère : "TSH", "T.S.H", "T S H", "thyreostimuline", etc.
-    tsh_pattern = re.compile(
-        r"(t\s*\.?\s*s\s*\.?\s*h|tsh|thyreostimuline|thyrotrop[eie]ne)",
-        re.IGNORECASE,
-    )
-
-    for m in tsh_pattern.finditer(norm):
-        # contexte après le mot TSH
-        start = max(0, m.end())
-        ctx = norm[start:start + 160]
-
-        value, mv = _first_value(ctx)
-        if mv is None or value is None:
+        if value is None:
             continue
 
-        # bornes "plausibles" pour une TSH
-        if not (0 <= value <= 150):
-            continue
-
-        # valeurs de référence dans ce qui suit
-        ref_min, ref_max = _extract_ref_interval(ctx[mv.end():])
+        start, end = m.span()
+        # Petit contexte autour du match pour debug éventuel
+        segment = text[max(0, start - 40): min(len(text), end + 40)]
 
         candidates.append(
-            ParsedTSH(
-                ok=True,
+            TSHMatch(
+                label=label,
                 value=value,
-                unit="mUI/L",  # on fixe l'unité, plus simple et plus robuste
                 ref_min=ref_min,
                 ref_max=ref_max,
-                confidence=_conf("high" if ref_min is not None else "medium"),
-                error=None,
+                unit=unit,
+                span=(start, end),
+                raw_segment=segment,
             )
         )
 
-    if candidates:
-        # on garde le candidat avec la meilleure "confidence"
-        order = {"high": 2, "medium": 1, "low": 0}
-        candidates.sort(key=lambda c: order.get(c.confidence or "", 0), reverse=True)
-        return candidates[0]
+    return candidates
 
-    # 2) Fallback très large : n'importe quelle valeur "raisonnable"
-    #    dans tout le texte.
-    any_value, m_any = _first_value(norm)
-    if m_any is not None and any_value is not None and 0 <= any_value <= 150:
-        ref_min, ref_max = _extract_ref_interval(norm[m_any.end():m_any.end() + 80])
-        return ParsedTSH(
-            ok=True,
-            value=any_value,
-            unit="mUI/L",
-            ref_min=ref_min,
-            ref_max=ref_max,
-            confidence=_conf("low"),
-            error=None,
-        )
 
-    # 3) Rien trouvé
-    return ParsedTSH(False, None, None, None, None, None, "TSH_NOT_FOUND")
+def _score_candidate(c: TSHMatch) -> tuple:
+    """
+    Calcule un score triable pour ordonner les candidats TSH.
+    Plus le score est petit, plus le candidat est "bon".
+    Critères :
+      1. Avoir une plage de référence complète (ref_min et ref_max)
+      2. Label contenant explicitement 'TSH'
+      3. Valeur cohérente avec la plage (si dispo)
+    """
+    # 1. Plage complète ou non
+    has_range = 0 if (c.ref_min is not None and c.ref_max is not None) else 1
+
+    # 2. Qualité du label
+    label = c.label.lower()
+    if "tsh" in label:
+        label_penalty = 0
+    elif "thyr" in label:
+        label_penalty = 1
+    else:
+        label_penalty = 2
+
+    # 3. Cohérence valeur/plage (si on a la plage)
+    range_penalty = 0
+    if c.ref_min is not None and c.ref_max is not None:
+        # petite marge de tolérance à cause des approximations OCR
+        low = c.ref_min - 0.5
+        high = c.ref_max + 0.5
+        if not (low <= c.value <= high):
+            range_penalty = 1
+
+    # On renvoie un tuple : Python triera dans cet ordre
+    return has_range, label_penalty, range_penalty
+
+
+def pick_best_tsh_match(candidates: List[TSHMatch]) -> Optional[TSHMatch]:
+    """
+    Sélectionne le "meilleur" bloc TSH parmi tous les candidats.
+    """
+    if not candidates:
+        return None
+
+    candidates_sorted = sorted(
+        candidates,
+        key=lambda c: (*_score_candidate(c), c.span[0]),
+    )
+    return candidates_sorted[0]
+
+
+def premium_parse_tsh(raw_text: str, boxes) -> ParsedTSH:
+    """
+    Parser principal TSH.
+    - Analyse le texte OCR brut avec une regex robuste
+    - Sélectionne le meilleur candidat via des heuristiques simples
+    - Renvoie un objet ParsedTSH avec ok/value/unit/ref_min/ref_max/confidence/error
+
+    Paramètres :
+      raw_text : texte brut renvoyé par l'OCR
+      boxes    : boxes OCR (non utilisées pour l'instant mais gardées pour compat)
+    """
+    text = raw_text or ""
+    candidates = _find_tsh_candidates(text)
+
+    if not candidates:
+        return ParsedTSH(ok=False, error="TSH_NOT_FOUND")
+
+    best = pick_best_tsh_match(candidates)
+    if not best:
+        return ParsedTSH(ok=False, error="TSH_NOT_FOUND")
+
+    # Estimation très simple de la confiance
+    confidence = "low"
+    if best.ref_min is not None and best.ref_max is not None:
+        # Valeur dans la plage => confiance élevée
+        if best.ref_min - 0.5 <= best.value <= best.ref_max + 0.5:
+            confidence = "high"
+        else:
+            confidence = "medium"
+    elif best.ref_min is not None or best.ref_max is not None:
+        confidence = "medium"
+
+    return ParsedTSH(
+        ok=True,
+        value=best.value,
+        unit=best.unit,
+        ref_min=best.ref_min,
+        ref_max=best.ref_max,
+        confidence=confidence,
+        error=None,
+    )
