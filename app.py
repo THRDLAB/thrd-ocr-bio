@@ -147,49 +147,51 @@ async def ocr_tsh(
             raw_text=raw_text,
         )
 
-    # AUTO MODE: light -> premium -> optimum
-    # 1) Light
-    parsed, error, raw_text = _run_and_parse(tmp_path, "light")
-    if parsed:
+      # MODE AUTO : light -> premium -> optimum
+    if mode == "auto":
+        # 1) Light
+        parsed, error, raw_text = _run_and_parse(tmp_path, "light")
+        if parsed and not (parsed.ref_min is None and parsed.ref_max is None):
+            return TSHResponse(
+                ok=True,
+                tsh_value=parsed.value,
+                tsh_unit=parsed.unit,
+                ref_min=parsed.ref_min,
+                ref_max=parsed.ref_max,
+                confidence=parsed.confidence,
+                raw_text=raw_text,
+            )
+
+        # 2) Premium
+        parsed, error, raw_text = _run_and_parse(tmp_path, "premium")
+        if parsed and not (parsed.ref_min is None and parsed.ref_max is None):
+            return TSHResponse(
+                ok=True,
+                tsh_value=parsed.value,
+                tsh_unit=parsed.unit,
+                ref_min=parsed.ref_min,
+                ref_max=parsed.ref_max,
+                confidence=parsed.confidence,
+                raw_text=raw_text,
+            )
+
+        # 3) Optimum – dernier recours, on accepte même sans bornes
+        parsed, error, raw_text = _run_and_parse(tmp_path, "optimum")
+        if parsed:
+            return TSHResponse(
+                ok=True,
+                tsh_value=parsed.value,
+                tsh_unit=parsed.unit,
+                ref_min=parsed.ref_min,
+                ref_max=parsed.ref_max,
+                confidence=parsed.confidence,
+                raw_text=raw_text,
+            )
+
+        # Rien n'a marché
         return TSHResponse(
-            ok=True,
-            tsh_value=parsed.value,
-            tsh_unit=parsed.unit,
-            ref_min=parsed.ref_min,
-            ref_max=parsed.ref_max,
-            confidence=parsed.confidence,
+            ok=False,
+            error=error or "TSH_NOT_FOUND",
             raw_text=raw_text,
         )
 
-    # 2) Premium
-    parsed, error, raw_text = _run_and_parse(tmp_path, "premium")
-    if parsed:
-        return TSHResponse(
-            ok=True,
-            tsh_value=parsed.value,
-            tsh_unit=parsed.unit,
-            ref_min=parsed.ref_min,
-            ref_max=parsed.ref_max,
-            confidence=parsed.confidence,
-            raw_text=raw_text,
-        )
-
-    # 3) Optimum
-    parsed, error, raw_text = _run_and_parse(tmp_path, "optimum")
-    if parsed:
-        return TSHResponse(
-            ok=True,
-            tsh_value=parsed.value,
-            tsh_unit=parsed.unit,
-            ref_min=parsed.ref_min,
-            ref_max=parsed.ref_max,
-            confidence=parsed.confidence,
-            raw_text=raw_text,
-        )
-
-    # Final failure
-    return TSHResponse(
-        ok=False,
-        error=error or "TSH_NOT_FOUND",
-        raw_text=raw_text,
-    )
