@@ -1,11 +1,13 @@
 import os
 import shutil
 import uuid
+from typing import Literal
+
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from ocr_engine import premium_extract_text, light_extract_text
+from ocr_engine import light_extract_text, premium_extract_text, optimum_extract_text
 from parsers.tsh import premium_parse_tsh
 
 
@@ -29,7 +31,7 @@ class TSHResponse(BaseModel):
 # FASTAPI INIT
 # =========================================================
 
-app = FastAPI(title="THRD OCR Bio", version="2.0 Premium")
+app = FastAPI(title="THRD OCR Bio", version="3.0 Multi-Level")
 
 app.add_middleware(
     CORSMiddleware,
@@ -66,17 +68,58 @@ async def health():
 
 
 # =========================================================
-# OCR TSH ENDPOINT (PREMIUM)
+# INTERNAL HELPER
+# =========================================================
+
+def _run_and_parse(path: str, level: Literal["light", "premium", "optimum"]):
+    """Run OCR at the given level and parse TSH.
+
+    Returns:
+        (parsed, error, raw_text)
+        - parsed: result object from premium_parse_tsh or None
+        - error: error string or None
+        - raw_text: raw OCR text or None
+    """
+    if level == "light":
+        extract = light_extract_text
+    elif level == "premium":
+        extract = premium_extract_text
+    else:
+        extract = optimum_extract_text
+
+    ocr = extract(path)
+    if not ocr:
+        return None, "OCR_FAILED", None
+
+    parsed = premium_parse_tsh(ocr.raw_text, ocr.boxes)
+    if not parsed.ok:
+        return None, parsed.error, ocr.raw_text
+
+    return parsed, None, ocr.raw_text
+
+
+# =========================================================
+# OCR TSH ENDPOINT (MULTI-LEVEL)
 # =========================================================
 
 @app.post("/ocr/tsh", response_model=TSHResponse)
-async def ocr_tsh(file: UploadFile = File(...)):
-    """
-    Full OCR pipeline:
-    1. Save file
-    2. Multi-variant OCR (light en first puis premium)
-    3. Premium TSH parser
-    4. JSON response simplified for Bubble
+async def ocr_tsh(
+    file: UploadFile = File(...),
+    mode: Literal["auto", "light", "premium", "optimum"] = "auto",
+):
+    """Full OCR pipeline for TSH.
+
+    Steps:
+      1. Save uploaded file to /tmp
+      2. Depending on `mode`, run one or several OCR passes
+      3. Parse TSH block with premium parser
+      4. Return a simplified JSON response for Bubble
+
+    Modes:
+      - light:    1 seul passage OCR rapide
+      - premium:  qualité standard (texte + boxes)
+      - optimum:  mode renforcé pour images difficiles
+      - auto:     light -> premium -> optimum (fallback progressif)
     """
     if not file:
         raise HTTPException(status_code=400, detail="Missing file")
@@ -84,48 +127,69 @@ async def ocr_tsh(file: UploadFile = File(...)):
     # 1. Save file
     tmp_path = save_temp_file(file)
 
-    # 2. Premier passage : OCR LIGHT
-    ocr = light_extract_text(tmp_path)
-    parsed = None
-
-    if ocr:
-        parsed = premium_parse_tsh(ocr.raw_text, ocr.boxes)
-        if parsed.ok:
-            # Succès direct en mode light → on renvoie tout de suite
+    # Explicit modes: single pass
+    if mode in ("light", "premium", "optimum"):
+        parsed, error, raw_text = _run_and_parse(tmp_path, mode)
+        if not parsed:
             return TSHResponse(
-                ok=True,
-                tsh_value=parsed.value,
-                tsh_unit=parsed.unit,
-                ref_min=parsed.ref_min,
-                ref_max=parsed.ref_max,
-                confidence=parsed.confidence,
-                raw_text=ocr.raw_text,
+                ok=False,
+                error=error,
+                raw_text=raw_text,
             )
 
-    # 3. Fallback : OCR PREMIUM (texte + boxes)
-    ocr = premium_extract_text(tmp_path)
-    if not ocr:
         return TSHResponse(
-            ok=False,
-            error="OCR_FAILED",
-            raw_text=None
+            ok=True,
+            tsh_value=parsed.value,
+            tsh_unit=parsed.unit,
+            ref_min=parsed.ref_min,
+            ref_max=parsed.ref_max,
+            confidence=parsed.confidence,
+            raw_text=raw_text,
         )
 
-    parsed = premium_parse_tsh(ocr.raw_text, ocr.boxes)
-    if not parsed.ok:
+    # AUTO MODE: light -> premium -> optimum
+    # 1) Light
+    parsed, error, raw_text = _run_and_parse(tmp_path, "light")
+    if parsed:
         return TSHResponse(
-            ok=False,
-            error=parsed.error,
-            raw_text=ocr.raw_text
+            ok=True,
+            tsh_value=parsed.value,
+            tsh_unit=parsed.unit,
+            ref_min=parsed.ref_min,
+            ref_max=parsed.ref_max,
+            confidence=parsed.confidence,
+            raw_text=raw_text,
         )
 
-    # 4. Réponse finale (succès premium)
+    # 2) Premium
+    parsed, error, raw_text = _run_and_parse(tmp_path, "premium")
+    if parsed:
+        return TSHResponse(
+            ok=True,
+            tsh_value=parsed.value,
+            tsh_unit=parsed.unit,
+            ref_min=parsed.ref_min,
+            ref_max=parsed.ref_max,
+            confidence=parsed.confidence,
+            raw_text=raw_text,
+        )
+
+    # 3) Optimum
+    parsed, error, raw_text = _run_and_parse(tmp_path, "optimum")
+    if parsed:
+        return TSHResponse(
+            ok=True,
+            tsh_value=parsed.value,
+            tsh_unit=parsed.unit,
+            ref_min=parsed.ref_min,
+            ref_max=parsed.ref_max,
+            confidence=parsed.confidence,
+            raw_text=raw_text,
+        )
+
+    # Final failure
     return TSHResponse(
-        ok=True,
-        tsh_value=parsed.value,
-        tsh_unit=parsed.unit,
-        ref_min=parsed.ref_min,
-        ref_max=parsed.ref_max,
-        confidence=parsed.confidence,
-        raw_text=ocr.raw_text
+        ok=False,
+        error=error or "TSH_NOT_FOUND",
+        raw_text=raw_text,
     )
