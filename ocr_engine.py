@@ -48,7 +48,7 @@ def preprocess_for_bio(im: Image.Image) -> Image.Image:
     gray = gray.filter(ImageFilter.SHARPEN)
 
     # Resize uniquement si l'image est très grande
-    max_side = 1600
+    max_side = 1550
     w2, h2 = gray.size
     m = max(w2, h2)
     if m > max_side:
@@ -102,6 +102,58 @@ def _run_tesseract_data(img: Image.Image, psm: int = 6) -> List[dict]:
         )
     return boxes
 
+def light_extract_text(path: str) -> Optional[OCRResult]:
+    """
+    Version light de l'OCR :
+
+      - même pré-traitement que la version premium
+      - un seul passage Tesseract pour le texte brut
+      - pas de récupération des boxes (image_to_data)
+
+    Utilisée comme premier essai rapide ; si le parsing TSH échoue,
+    on bascule sur `premium_extract_text`.
+    """
+    # 1) Load
+    try:
+        img = _load_image(path)
+    except Exception as e:
+        print("OCR-LIGHT ERROR: failed to load image:", e)
+        print(traceback.format_exc())
+        return None
+
+    # 2) Preprocess (même logique que le premium)
+    try:
+        img = preprocess_for_bio(img)
+    except Exception as e:
+        print("OCR-LIGHT ERROR: preprocessing failed:", e)
+        print(traceback.format_exc())
+        # Fallback : on tente quand même avec l'image brute redimensionnée
+        try:
+            w, h = img.size
+            max_side = 1400  # un poil plus agressif que le premium
+            m = max(w, h)
+            if m > max_side:
+                r = max_side / m
+                img = img.resize((int(w * r), int(h * r)), Image.LANCZOS)
+        except Exception:
+            return None
+
+    # 3) OCR texte uniquement (PAS de boxes en mode light)
+    try:
+        raw_text = _run_tesseract_string(img, psm=6)
+    except Exception as e:
+        print("OCR-LIGHT ERROR: image_to_string failed:", e)
+        print(traceback.format_exc())
+        return None
+
+    raw_text = raw_text or ""
+    if not raw_text.strip():
+        print("OCR-LIGHT ERROR: empty text")
+        return None
+
+    # On renvoie des boxes vides : le parser peut vivre sans,
+    # et si ça ne suffit pas on passera en premium.
+    return OCRResult(raw_text=raw_text, boxes=[])
 
 
 def premium_extract_text(path: str) -> Optional[OCRResult]:
