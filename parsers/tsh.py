@@ -22,11 +22,12 @@ class ParsedTSH:
 class TSHMatch:
     label: str
     value: float
+    unit: Optional[str]
     ref_min: Optional[float]
     ref_max: Optional[float]
-    unit: Optional[str]
     span: Tuple[int, int]
-    raw_segment: str
+    raw_line: str
+    raw_snippet: str
 
 
 # --------------------------------------------------------------------
@@ -34,6 +35,7 @@ class TSHMatch:
 # --------------------------------------------------------------------
 
 def _normalize_text(text: str) -> str:
+    """Nettoyage léger du texte OCR."""
     if not text:
         return ""
     text = text.replace("\r", "\n")
@@ -42,7 +44,8 @@ def _normalize_text(text: str) -> str:
     return text
 
 
-def _to_float(s: Optional[str]) -> Optional[float]:
+def _to_float(s: str) -> Optional[float]:
+    """Convertit une chaîne en float (gère la virgule)."""
     if not s:
         return None
     s = s.replace(" ", "").replace("\u00a0", "")
@@ -53,124 +56,164 @@ def _to_float(s: Optional[str]) -> Optional[float]:
         return None
 
 
+def _adjust_ref_value(raw: str) -> Optional[float]:
+    """
+    Corrige des références typiques OCR :
+    - "0,40" -> 0.40
+    - "027"  -> 0.27
+    - "494"  -> 4.94
+    - "4000" -> 4.0
+    """
+    if not raw:
+        return None
+
+    # Si déjà un séparateur décimal → on garde tel quel
+    if "," in raw or "." in raw:
+        return _to_float(raw)
+
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if not digits:
+        return None
+
+    try:
+        val_int = int(digits)
+    except ValueError:
+        return None
+
+    # Heuristique : selon le nombre de chiffres, on re-scale
+    n = len(digits)
+
+    # 4 chiffres ou plus, souvent "4000" = 4.000
+    if n >= 4:
+        return val_int / 1000.0
+
+    # 3 chiffres : souvent "027" = 0.27, "494" = 4.94
+    if n == 3:
+        return val_int / 100.0
+
+    # 1 ou 2 chiffres, on laisse tel quel
+    return float(val_int)
+
+
 # --------------------------------------------------------------------
-# REGEX solides TSH
+# Regex pour détecter la ligne TSH + nombres
 # --------------------------------------------------------------------
 
-TSH_LABEL = r"""
-\b(?:
-    (?<![a-z0-9])t\s*\.?\s*s\s*\.?\s*h(?![a-z0-9])   # formes décomposées exactes T S H
-  | tsh(?:\s*us)?                                    # TSH, TSHus
-  | tsh\s*ultra\s*sensible                           # TSH ultra sensible
-  | tsh\s*3(?:e|ème)\s*gen                            # TSH 3e/3ème GEN
-  | thyr[eé]ostimuline                                # thyréostimuline
-  | thyrotrop(?:ine|e)                                # thyrotropine
-)\b
-"""
+# Label TSH : couvre les variantes vues dans tes docs
+TSH_LABEL_PATTERN = (
+    r"(?:"
+    r"TSHus\s*3(?:e|ème)\s*GEN"                  # TSHus 3ème GEN
+    r"|TSH\s*3(?:e|ème)\s*g[ée]n[ée]?ration?"    # TSH 3ème génération
+    r"|TSH\s*ultra\s*sensible"                  # TSH ultra sensible
+    r"|TSHus\b"                                 # TSHus
+    r"|TSH\b"                                   # TSH simple
+    r"|thyr[eé]ostimuline"                      # thyréostimuline
+    r"|thyrotropine"                            # thyrotropine
+    r")"
+)
 
-NUMBER = r"[+-]?\d+(?:[.,]\d+)?"
+LABEL_RE = re.compile(TSH_LABEL_PATTERN, re.IGNORECASE)
 
-TSH_UNIT = r"(?:m ?UI/?L|µ ?UI/?L|u ?UI/?mL|mIU/?L|mU/?L|pUI/?mL|UI/?L|mUI|µUI|uUI)?"
+# Nombre avec . ou , (style FR/US)
+NUM_RE = re.compile(r"[+-]?\d+(?:[.,]\d+)?")
 
-
-TSH_BLOCK_REGEX = re.compile(
-    rf"""
-    (?P<label>{TSH_LABEL})
-
-    [^0-9\n]{{0,60}}                      # bruit
-
-    (?P<value>{NUMBER})
-
-    \s*
-    (?P<unit>{TSH_UNIT})
-
-    (?:                                  # Plage optionnelle
-        [^\d\n]{{0,20}}
-        (?P<ref_min>{NUMBER})
-        \s*
-        (?:-|–|—|~|à|a|>|<|≤|>=|to|et|&)
-        \s*
-        (?P<ref_max>{NUMBER})
-    )?
-    """,
-    re.IGNORECASE | re.VERBOSE | re.MULTILINE,
+# Plage de références : x - y, x à y, x & y, etc.
+RANGE_RE = re.compile(
+    r"(?P<min>[+-]?\d+(?:[.,]\d+)?)\s*"
+    r"(?:-|–|—|~|à|a|to|&)\s*"
+    r"(?P<max>[+-]?\d+(?:[.,]\d+)?)"
 )
 
 
 # --------------------------------------------------------------------
-# Extraction candidats
+# Extraction candidate sur une ligne
 # --------------------------------------------------------------------
+
+def _extract_tsh_from_line(line: str) -> Optional[TSHMatch]:
+    """
+    Cherche une ligne contenant un label TSH, puis :
+      - première valeur numérique après le label = TSH
+      - plage éventuelle x - y après cette valeur = ref_min/ref_max
+    """
+    m = LABEL_RE.search(line)
+    if not m:
+        return None
+
+    label = m.group(0)
+    snippet = line[m.end():]  # tout ce qu'il y a après le label
+
+    # 1) TSH value : premier nombre après le label
+    nums = list(NUM_RE.finditer(snippet))
+    if not nums:
+        return None
+
+    tsh_num = nums[0]
+    tsh_value = _to_float(tsh_num.group())
+    if tsh_value is None:
+        return None
+
+    # 2) Unité éventuelle : très simple, on regarde juste autour
+    unit = None
+    unit_window = snippet[tsh_num.end():tsh_num.end() + 20]
+    # On prend "UI/L", "mUI/L", "µUI/L", "uUI/mL", etc. si présents
+    unit_match = re.search(
+        r"(m ?UI/?L|µ ?UI/?L|u ?UI/?mL|mIU/?L|mU/?L|pUI/?mL|UI/?L|mUI|µUI|uUI)",
+        unit_window,
+        re.IGNORECASE,
+    )
+    if unit_match:
+        unit = unit_match.group(0)
+
+    # 3) Plage de référence : après la valeur TSH
+    after_pos = tsh_num.end()
+    range_match = RANGE_RE.search(snippet, after_pos)
+    ref_min = ref_max = None
+    if range_match:
+        ref_min = _adjust_ref_value(range_match.group("min"))
+        ref_max = _adjust_ref_value(range_match.group("max"))
+
+    return TSHMatch(
+        label=label,
+        value=tsh_value,
+        unit=unit,
+        ref_min=ref_min,
+        ref_max=ref_max,
+        span=m.span(),
+        raw_line=line,
+        raw_snippet=snippet,
+    )
+
 
 def _find_tsh_candidates(raw_text: str) -> List[TSHMatch]:
     text = _normalize_text(raw_text)
+    lines = text.split("\n")
     candidates: List[TSHMatch] = []
 
-    for m in TSH_BLOCK_REGEX.finditer(text):
-        label = m.group("label") or ""
-        value = _to_float(m.group("value"))
-        ref_min = _to_float(m.group("ref_min"))
-        ref_max = _to_float(m.group("ref_max"))
-        unit = (m.group("unit") or "").strip() or None
-
-        if value is None:
+    for line in lines:
+        if "TSH" not in line and "tsh" not in line and "Thyr" not in line and "thyr" not in line:
+            # petit filtre rapide pour éviter des regex sur toutes les lignes
             continue
 
-        start, end = m.span()
-        segment = text[max(0, start - 40): min(len(text), end + 40)]
-
-        candidates.append(
-            TSHMatch(
-                label=label,
-                value=value,
-                ref_min=ref_min,
-                ref_max=ref_max,
-                unit=unit,
-                span=(start, end),
-                raw_segment=segment,
-            )
-        )
+        cand = _extract_tsh_from_line(line)
+        if cand:
+            candidates.append(cand)
 
     return candidates
 
 
 # --------------------------------------------------------------------
-# Scoring candidats TSH : cœur du fix
+# Sélection du meilleur candidat
 # --------------------------------------------------------------------
 
 def _score_candidate(c: TSHMatch) -> tuple:
     """
-    Score triable :
-    1. Valide la plage (ou rejette)
-    2. Label solide (TSH > thyréostimuline)
-    3. Cohérence valeur/plage
-    4. Valeur physiologiquement correcte
+    Score simple :
+      1. A une plage de référence complète ou non
+      2. Label "fort" (TSH, TSHus...) vs. plus générique
+      3. Utilisé pour trier, pas pour rejeter.
     """
+    has_range = 0 if (c.ref_min is not None and c.ref_max is not None) else 1
 
-    # Sécurité physiologique TSH
-    if c.value < 0.001 or c.value > 100:
-        return (999, 999, 999, 999)
-
-    # Vérification plage si existante
-    if c.ref_min is not None and c.ref_max is not None:
-
-        # plages impossibles → rejet
-        if c.ref_min <= 0 or c.ref_max <= 0:
-            return (999, 999, 999, 999)
-        if c.ref_min > c.ref_max:
-            return (999, 999, 999, 999)
-        if c.ref_max < 0.05:  # trop petit = OCR raté
-            return (999, 999, 999, 999)
-
-        # cohérence valeur/plage
-        if not (c.ref_min - 0.5 <= c.value <= c.ref_max + 0.5):
-            range_penalty = 1
-        else:
-            range_penalty = 0
-    else:
-        # pas de plage → moins bon
-        range_penalty = 2
-
-    # Label strength
     label = c.label.lower()
     if "tsh" in label:
         label_penalty = 0
@@ -179,45 +222,44 @@ def _score_candidate(c: TSHMatch) -> tuple:
     else:
         label_penalty = 2
 
-    # On trie selon :
-    # (a une plage?, label, cohérence, position)
-    has_range = 0 if (c.ref_min is not None and c.ref_max is not None) else 1
-
-    return (has_range, label_penalty, range_penalty)
+    return (has_range, label_penalty)
 
 
-def pick_best_tsh_match(candidates: List[TSHMatch]) -> Optional[TSHMatch]:
+def _pick_best_candidate(candidates: List[TSHMatch]) -> Optional[TSHMatch]:
     if not candidates:
         return None
-
-    candidates_sorted = sorted(
+    # On trie par : a une plage ? / type de label / position dans le texte
+    return sorted(
         candidates,
-        key=lambda c: (*_score_candidate(c), c.span[0])
-    )
-    return candidates_sorted[0]
+        key=lambda c: (*_score_candidate(c), c.span[0]),
+    )[0]
 
 
 # --------------------------------------------------------------------
-# Parser final
+# Parser principal
 # --------------------------------------------------------------------
 
 def premium_parse_tsh(raw_text: str, boxes) -> ParsedTSH:
+    """
+    Parser TSH utilisé partout :
+
+      - prend raw_text (issu de n'importe quel niveau OCR : light, premium, optimum)
+      - repère la ligne contenant TSH
+      - extrait valeur + unité + plage si possible
+    """
     text = raw_text or ""
     candidates = _find_tsh_candidates(text)
 
     if not candidates:
         return ParsedTSH(ok=False, error="TSH_NOT_FOUND")
 
-    best = pick_best_tsh_match(candidates)
+    best = _pick_best_candidate(candidates)
     if not best:
         return ParsedTSH(ok=False, error="TSH_NOT_FOUND")
 
-    # Estimation de confiance
+    # Estimation très simple de la confiance
     if best.ref_min is not None and best.ref_max is not None:
-        if best.ref_min - 0.5 <= best.value <= best.ref_max + 0.5:
-            confidence = "high"
-        else:
-            confidence = "medium"
+        confidence = "high"
     else:
         confidence = "low"
 
