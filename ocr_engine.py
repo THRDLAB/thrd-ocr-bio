@@ -264,26 +264,42 @@ def optimum_extract_text(path: str) -> Optional[OCRResult]:
     raw_text = raw_text or ""
 
     # 4) OCR avec boxes mais conf très bas (ex. >= 20)
-    try:
-        data = _run_tesseract_data(bin_img, psm=6)
-        boxes = []
-        for i, txt in enumerate(data["text"]):
-            if not txt or not txt.strip():
-                continue
+try:
+    data = _run_tesseract_data(bin_img, psm=6)
+
+    # Sécurité anti-crash : Tesseract peut retourner une liste ou un string
+    if not isinstance(data, dict) or "text" not in data:
+        print("OCR-OPTIMUM WARNING: malformed data from Tesseract")
+        data = {"text": [], "conf": [], "left": [], "top": [], "width": [], "height": []}
+
+    boxes = []
+    for i, txt in enumerate(data["text"]):
+        if not txt or not txt.strip():
+            continue
+
+        # conf peut aussi être 'nan' -> try/except
+        try:
             conf = float(data["conf"][i])
-            if conf < 20:   # seuil plus bas que le premium
-                continue
-            x, y, w, h = (
-                int(data["left"][i]),
-                int(data["top"][i]),
-                int(data["width"][i]),
-                int(data["height"][i]),
-            )
-            boxes.append(OCRBox(text=txt, conf=conf, x=x, y=y, w=w, h=h))
-    except Exception as e:
-        print("OCR-OPTIMUM ERROR: image_to_data failed:", e)
-        print(traceback.format_exc())
-        boxes = []
+        except Exception:
+            conf = 0.0
+
+        if conf < 20:
+            continue
+
+        try:
+            x = int(data["left"][i])
+            y = int(data["top"][i])
+            w = int(data["width"][i])
+            h = int(data["height"][i])
+        except Exception:
+            continue
+
+        boxes.append(OCRBox(text=txt, conf=conf, x=x, y=y, w=w, h=h))
+
+except Exception as e:
+    print(f"OCR-OPTIMUM ERROR: image_to_data failed: {e}")
+    print(traceback.format_exc())
+    boxes = []
 
     if not raw_text.strip() and not boxes:
         return None
