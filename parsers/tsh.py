@@ -67,7 +67,6 @@ def _adjust_ref_value(raw: str) -> Optional[float]:
     if not raw:
         return None
 
-    # Si déjà un séparateur décimal → on garde tel quel
     if "," in raw or "." in raw:
         return _to_float(raw)
 
@@ -80,7 +79,6 @@ def _adjust_ref_value(raw: str) -> Optional[float]:
     except ValueError:
         return None
 
-    # Heuristique : selon le nombre de chiffres, on re-scale
     n = len(digits)
 
     # 4 chiffres ou plus, souvent "4000" = 4.000
@@ -96,19 +94,20 @@ def _adjust_ref_value(raw: str) -> Optional[float]:
 
 
 # --------------------------------------------------------------------
-# Regex pour détecter la ligne TSH + nombres
+# Regex pour détecter les labels & nombres
 # --------------------------------------------------------------------
 
-# Label TSH : couvre les variantes vues dans tes docs
+# Base "TSH" tolérant les points/espaces : T.S.H, T S H, TSH...
+BASE_TSH = r"T[.\s]*S[.\s]*H"
+
 TSH_LABEL_PATTERN = (
     r"(?:"
-    r"TSHus\s*3(?:e|ème)\s*GEN"                  # TSHus 3ème GEN
-    r"|TSH\s*3(?:e|ème)\s*g[ée]n[ée]?ration?"    # TSH 3ème génération
-    r"|TSH\s*ultra\s*sensible"                  # TSH ultra sensible
-    r"|TSHus\b"                                 # TSHus
-    r"|TSH\b"                                   # TSH simple
-    r"|thyr[eé]ostimuline"                      # thyréostimuline
-    r"|thyrotropine"                            # thyrotropine
+    rf"{BASE_TSH}\s*3(?:e|ème)\s*g[ée]n[ée]?ration?"   # T.S.H 3ème génération
+    rf"|{BASE_TSH}\s*ultra\s*sensible"                # T.S.H ultra sensible
+    rf"|{BASE_TSH}\s*us\b"                            # T.S.Hus / TSHus
+    rf"|{BASE_TSH}\b"                                 # T.S.H / TSH simple
+    r"|thyr[eé]ostimuline"                            # thyréostimuline
+    r"|thyrotropine"                                  # thyrotropine
     r")"
 )
 
@@ -126,10 +125,10 @@ RANGE_RE = re.compile(
 
 
 # --------------------------------------------------------------------
-# Extraction candidate sur une ligne
+# Extraction candidate sur une ligne avec label TSH
 # --------------------------------------------------------------------
 
-def _extract_tsh_from_line(line: str) -> Optional[TSHMatch]:
+def _extract_tsh_from_labelled_line(line: str) -> Optional[TSHMatch]:
     """
     Cherche une ligne contenant un label TSH, puis :
       - première valeur numérique après le label = TSH
@@ -152,10 +151,9 @@ def _extract_tsh_from_line(line: str) -> Optional[TSHMatch]:
     if tsh_value is None:
         return None
 
-    # 2) Unité éventuelle : très simple, on regarde juste autour
+    # 2) Unité éventuelle : autour de la valeur
     unit = None
-    unit_window = snippet[tsh_num.end():tsh_num.end() + 20]
-    # On prend "UI/L", "mUI/L", "µUI/L", "uUI/mL", etc. si présents
+    unit_window = snippet[tsh_num.end():tsh_num.end() + 25]
     unit_match = re.search(
         r"(m ?UI/?L|µ ?UI/?L|u ?UI/?mL|mIU/?L|mU/?L|pUI/?mL|UI/?L|mUI|µUI|uUI)",
         unit_window,
@@ -184,19 +182,86 @@ def _extract_tsh_from_line(line: str) -> Optional[TSHMatch]:
     )
 
 
+# --------------------------------------------------------------------
+# Fallback : ligne avec mUI / UI/L même sans label (cas image 2)
+# --------------------------------------------------------------------
+
+def _extract_tsh_from_mui_line(line: str) -> Optional[TSHMatch]:
+    """
+    Fallback : pour les cas où le label TSH a sauté à l'OCR (ex: image 2 Cerballiance).
+
+    Stratégie :
+      - on cherche les lignes qui contiennent 'mUI' ou 'UI/L'
+      - on prend le nombre juste AVANT 'mUI' comme TSH
+      - on essaie de récupérer une éventuelle plage x - y derrière
+    """
+    if "mui" not in line.lower() and "ui/l" not in line.lower():
+        return None
+
+    # On coupe autour de 'mUI' / 'UI/L'
+    unit_match = re.search(
+        r"(m ?UI/?L|µ ?UI/?L|u ?UI/?mL|mIU/?L|mU/?L|UI/?L|mUI|µUI|uUI)",
+        line,
+        re.IGNORECASE,
+    )
+    if not unit_match:
+        return None
+
+    unit = unit_match.group(0)
+    before = line[:unit_match.start()]
+    after = line[unit_match.end():]
+
+    # TSH value = dernier nombre avant l'unité
+    nums_before = list(NUM_RE.finditer(before))
+    if not nums_before:
+        return None
+    tsh_num = nums_before[-1]
+    tsh_value = _to_float(tsh_num.group())
+    if tsh_value is None:
+        return None
+
+    # Plage éventuelle après l'unité
+    range_match = RANGE_RE.search(after)
+    ref_min = ref_max = None
+    if range_match:
+        ref_min = _adjust_ref_value(range_match.group("min"))
+        ref_max = _adjust_ref_value(range_match.group("max"))
+
+    return TSHMatch(
+        label="TSH (fallback mUI)",
+        value=tsh_value,
+        unit=unit,
+        ref_min=ref_min,
+        ref_max=ref_max,
+        span=(0, len(line)),
+        raw_line=line,
+        raw_snippet=line,
+    )
+
+
+# --------------------------------------------------------------------
+# Recherche globale des candidats
+# --------------------------------------------------------------------
+
 def _find_tsh_candidates(raw_text: str) -> List[TSHMatch]:
     text = _normalize_text(raw_text)
     lines = text.split("\n")
     candidates: List[TSHMatch] = []
 
+    # 1) Candidats avec label explicite TSH
     for line in lines:
-        if "TSH" not in line and "tsh" not in line and "Thyr" not in line and "thyr" not in line:
-            # petit filtre rapide pour éviter des regex sur toutes les lignes
+        if not LABEL_RE.search(line) and "thyr" not in line.lower():
             continue
-
-        cand = _extract_tsh_from_line(line)
+        cand = _extract_tsh_from_labelled_line(line)
         if cand:
             candidates.append(cand)
+
+    # 2) Si aucun candidat avec label, on tente le fallback "mUI"
+    if not candidates:
+        for line in lines:
+            fallback_cand = _extract_tsh_from_mui_line(line)
+            if fallback_cand:
+                candidates.append(fallback_cand)
 
     return candidates
 
@@ -209,18 +274,20 @@ def _score_candidate(c: TSHMatch) -> tuple:
     """
     Score simple :
       1. A une plage de référence complète ou non
-      2. Label "fort" (TSH, TSHus...) vs. plus générique
-      3. Utilisé pour trier, pas pour rejeter.
+      2. Label "fort" (TSH/T.S.H) vs fallback
+      3. Permet de trier sans être trop violent.
     """
     has_range = 0 if (c.ref_min is not None and c.ref_max is not None) else 1
 
-    label = c.label.lower()
-    if "tsh" in label:
+    l = c.label.lower()
+    if "fallback" in l:
+        label_penalty = 2
+    elif "tsh" in l:
         label_penalty = 0
-    elif "thyr" in label:
+    elif "thyr" in l:
         label_penalty = 1
     else:
-        label_penalty = 2
+        label_penalty = 3
 
     return (has_range, label_penalty)
 
@@ -228,7 +295,6 @@ def _score_candidate(c: TSHMatch) -> tuple:
 def _pick_best_candidate(candidates: List[TSHMatch]) -> Optional[TSHMatch]:
     if not candidates:
         return None
-    # On trie par : a une plage ? / type de label / position dans le texte
     return sorted(
         candidates,
         key=lambda c: (*_score_candidate(c), c.span[0]),
@@ -241,11 +307,12 @@ def _pick_best_candidate(candidates: List[TSHMatch]) -> Optional[TSHMatch]:
 
 def premium_parse_tsh(raw_text: str, boxes) -> ParsedTSH:
     """
-    Parser TSH utilisé partout :
+    Parser TSH :
 
-      - prend raw_text (issu de n'importe quel niveau OCR : light, premium, optimum)
-      - repère la ligne contenant TSH
-      - extrait valeur + unité + plage si possible
+      - fonctionne sur le texte OCR brut (light/premium/optimum)
+      - repère la ligne TSH (y compris T.S.H 3ème génération)
+      - extrait : valeur, unité, bornes si possible
+      - si aucun label TSH trouvé : fallback sur la ligne 'mUI/L'
     """
     text = raw_text or ""
     candidates = _find_tsh_candidates(text)
@@ -257,11 +324,12 @@ def premium_parse_tsh(raw_text: str, boxes) -> ParsedTSH:
     if not best:
         return ParsedTSH(ok=False, error="TSH_NOT_FOUND")
 
-    # Estimation très simple de la confiance
     if best.ref_min is not None and best.ref_max is not None:
         confidence = "high"
-    else:
+    elif "fallback" in (best.label or "").lower():
         confidence = "low"
+    else:
+        confidence = "medium"
 
     return ParsedTSH(
         ok=True,
